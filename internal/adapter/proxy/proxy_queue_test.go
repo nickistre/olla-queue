@@ -50,7 +50,7 @@ func TestAllProxies_Queue(t *testing.T) {
 			const requests = 4
 			var wg sync.WaitGroup
 			var waited atomic.Int32
-			for i := 0; i < requests; i++ {
+			for range requests {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
@@ -109,7 +109,7 @@ func TestAllProxies_QueueFullRejects(t *testing.T) {
 
 			// One request holds the slot, one waits; the third must be turned away.
 			var wg sync.WaitGroup
-			for i := 0; i < 2; i++ {
+			for range 2 {
 				wg.Add(1)
 				go func() { defer wg.Done(); _ = send() }()
 			}

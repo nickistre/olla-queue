@@ -2,6 +2,7 @@ package balancer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -186,7 +187,7 @@ func (d *SlotDiscoverer) probeLlamaSwap(ctx context.Context, ep *domain.Endpoint
 		}
 	}
 	if sum == 0 {
-		return 0, fmt.Errorf("llama-swap reported no ready models with slots")
+		return 0, errors.New("llama-swap reported no ready models with slots")
 	}
 	return sum, nil
 }
@@ -194,7 +195,7 @@ func (d *SlotDiscoverer) probeLlamaSwap(ctx context.Context, ep *domain.Endpoint
 func totalSlots(body []byte) (int, error) {
 	n := gjson.GetBytes(body, "total_slots").Int()
 	if n <= 0 {
-		return 0, fmt.Errorf("no total_slots in /props response")
+		return 0, errors.New("no total_slots in /props response")
 	}
 	return int(n), nil
 }

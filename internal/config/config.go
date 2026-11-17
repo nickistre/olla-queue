@@ -204,25 +204,8 @@ func (c *Config) Validate() error {
 	if c.Proxy.Retry.MaxAttempts < 0 {
 		return fmt.Errorf("proxy.retry.max_attempts must be >= 0 (0 = every eligible endpoint once), got %d", c.Proxy.Retry.MaxAttempts)
 	}
-	if c.Proxy.Queue.Enabled {
-		q := c.Proxy.Queue
-		if q.MaxSize <= 0 {
-			return fmt.Errorf("proxy.queue.max_size must be > 0 when the queue is enabled, got %d", q.MaxSize)
-		}
-		if q.Timeout <= 0 {
-			return fmt.Errorf("proxy.queue.timeout must be > 0 when the queue is enabled, got %s", q.Timeout)
-		}
-		if q.DefaultSlots <= 0 {
-			return fmt.Errorf("proxy.queue.default_slots must be > 0 when the queue is enabled, got %d", q.DefaultSlots)
-		}
-		if q.DiscoverSlots && q.SlotRefreshInterval <= 0 {
-			return errors.New("proxy.queue.slot_refresh_interval must be > 0 when discover_slots is enabled (prevents ticker panic)")
-		}
-	}
-	for _, ep := range c.Discovery.Static.Endpoints {
-		if ep.MaxConcurrent < 0 {
-			return fmt.Errorf("endpoint %q max_concurrent must be >= 0 (0 = automatic), got %d", ep.Name, ep.MaxConcurrent)
-		}
+	if err := c.validateQueue(); err != nil {
+		return err
 	}
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port must be between 1 and 65535, got %d", c.Server.Port)
@@ -572,4 +555,33 @@ func parseByteSize(s string) (int64, error) {
 	}
 
 	return size, nil
+}
+
+// validateQueue checks proxy.queue and the per-endpoint max_concurrent it reads.
+// Queue fields are only enforced when the queue is on, so a half-filled block
+// left disabled never blocks startup.
+func (c *Config) validateQueue() error {
+	for _, ep := range c.Discovery.Static.Endpoints {
+		if ep.MaxConcurrent < 0 {
+			return fmt.Errorf("endpoint %q max_concurrent must be >= 0 (0 = automatic), got %d", ep.Name, ep.MaxConcurrent)
+		}
+	}
+
+	q := c.Proxy.Queue
+	if !q.Enabled {
+		return nil
+	}
+	if q.MaxSize <= 0 {
+		return fmt.Errorf("proxy.queue.max_size must be > 0 when the queue is enabled, got %d", q.MaxSize)
+	}
+	if q.Timeout <= 0 {
+		return fmt.Errorf("proxy.queue.timeout must be > 0 when the queue is enabled, got %s", q.Timeout)
+	}
+	if q.DefaultSlots <= 0 {
+		return fmt.Errorf("proxy.queue.default_slots must be > 0 when the queue is enabled, got %d", q.DefaultSlots)
+	}
+	if q.DiscoverSlots && q.SlotRefreshInterval <= 0 {
+		return errors.New("proxy.queue.slot_refresh_interval must be > 0 when discover_slots is enabled (prevents ticker panic)")
+	}
+	return nil
 }

@@ -64,7 +64,7 @@ func TestQueue_FastPathUntilSlotsFull(t *testing.T) {
 	a.MaxConcurrent = 2
 	eps := []*domain.Endpoint{a}
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		ep, err := q.Select(context.Background(), eps)
 		if err != nil || ep != a {
 			t.Fatalf("select %d: got %v, %v", i, ep, err)
@@ -95,7 +95,7 @@ func TestQueue_FIFOOrder(t *testing.T) {
 	var order []int
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -316,7 +316,7 @@ func TestQueue_StressNeverExceedsSlots(t *testing.T) {
 
 	var inFlight = map[string]*atomic.Int64{a.URLString: {}, b.URLString: {}}
 	var wg sync.WaitGroup
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()

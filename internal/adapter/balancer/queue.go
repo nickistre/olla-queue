@@ -267,7 +267,7 @@ func (q *QueueWrapper) PurgeDeadEndpoints(routable []*domain.Endpoint) {
 	defer q.mu.Unlock()
 	for e := q.waiters.Front(); e != nil; {
 		next := e.Next()
-		w := e.Value.(*queueWaiter)
+		w := waiterAt(e)
 		hasAlive := false
 		for _, ep := range w.candidates {
 			if _, ok := alive[ep.URLString]; ok {
@@ -290,7 +290,7 @@ func (q *QueueWrapper) Stop() {
 	q.closed = true
 	for e := q.waiters.Front(); e != nil; {
 		next := e.Next()
-		q.completeLocked(e.Value.(*queueWaiter), queueResult{err: ErrQueueClosed})
+		q.completeLocked(waiterAt(e), queueResult{err: ErrQueueClosed})
 		e = next
 	}
 }
@@ -302,7 +302,7 @@ func (q *QueueWrapper) Stop() {
 func (q *QueueWrapper) dispatchLocked() {
 	for e := q.waiters.Front(); e != nil; {
 		next := e.Next()
-		w := e.Value.(*queueWaiter)
+		w := waiterAt(e)
 		if free := q.freeLocked(w.candidates); len(free) > 0 {
 			ep, err := q.reserveLocked(w.ctx, free)
 			q.completeLocked(w, queueResult{endpoint: ep, err: err})
@@ -356,6 +356,12 @@ func (q *QueueWrapper) anyRoutable(endpoints []*domain.Endpoint) bool {
 		}
 	}
 	return false
+}
+
+// waiterAt unwraps a queue element. The list only ever holds *queueWaiter.
+func waiterAt(e *list.Element) *queueWaiter {
+	w, _ := e.Value.(*queueWaiter)
+	return w
 }
 
 func storeMax(v *atomic.Int64, n int64) {

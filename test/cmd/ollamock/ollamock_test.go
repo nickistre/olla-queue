@@ -1165,7 +1165,9 @@ func TestPropsTotalSlots(t *testing.T) {
 	var props struct {
 		TotalSlots int `json:"total_slots"`
 	}
-	decodeJSON(t, getURL(t, ts.URL+"/props"), &props)
+	propsResp := getURL(t, ts.URL+"/props")
+	defer propsResp.Body.Close()
+	decodeJSON(t, propsResp, &props)
 	if props.TotalSlots != 3 {
 		t.Fatalf("total_slots = %d, want 3", props.TotalSlots)
 	}
@@ -1194,7 +1196,9 @@ func TestMockStatsPeakInFlight(t *testing.T) {
 		InFlight     int64 `json:"in_flight"`
 		PeakInFlight int64 `json:"peak_in_flight"`
 	}
-	decodeJSON(t, getURL(t, ts.URL+"/_mock/stats"), &stats)
+	statsResp := getURL(t, ts.URL+"/_mock/stats")
+	defer statsResp.Body.Close()
+	decodeJSON(t, statsResp, &stats)
 	if stats.PeakInFlight != concurrent || stats.InFlight != 0 {
 		t.Fatalf("want peak %d and nothing in flight, got %+v", concurrent, stats)
 	}
