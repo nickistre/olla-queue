@@ -688,6 +688,12 @@ func (a *Application) prepareProxyContext(ctx context.Context, r *http.Request, 
 	// X-Olla-Queue-Wait-Ms.
 	if a.Config != nil && a.Config.Proxy.Queue.Enabled {
 		ctx = context.WithValue(ctx, constants.ContextQueueOutcomeKey, &domain.QueueOutcome{})
+		ctx = context.WithValue(ctx, constants.ContextQueueCallerKey, &domain.QueueCaller{
+			RequestID: pr.stats.RequestID,
+			ClientIP:  pr.clientIP,
+			Model:     pr.model,
+			UserAgent: pr.userAgent,
+		})
 		r = r.WithContext(ctx)
 	}
 

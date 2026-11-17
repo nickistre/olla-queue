@@ -65,6 +65,21 @@ For backends that can't be probed (Ollama, vLLM, SGLang and others), set `max_co
 curl http://localhost:40114/internal/stats/queue | jq
 ```
 
+`/internal/stats/queue` also lists every waiting request, oldest first, with:
+- request ID and client IP
+- model and user agent
+- the endpoint its sticky session is pinned to, if any
+- when it entered the queue
+
+The client IP honours `X-Forwarded-For` / `X-Real-IP` only from `server.rate_limits.trusted_proxy_cidrs` when `trust_proxy_headers` is on. Otherwise it is the connecting address. `/internal/status` carries a small `queue` summary (depth, peak, max size, wait counters) while the queue is on.
+
+### Dashboard
+
+While the queue is on, the dashboard at `/internal/ui/` shows it in three places:
+- **Activity chart:** a dashed queue-depth line, with the current depth in the readout.
+- **Overview tiles:** "Queued requests" (depth against `max_size`) and "Mean queue wait". The mean covers the chart's window (about 15 minutes), so it reflects current conditions and clears once the queue drains.
+- **Queue tab:** the waiting requests and each endpoint's slot usage, including where its limit came from.
+
 ## Configuration
 
 See [Request Queue](../configuration/reference.md#request-queue) in the configuration reference.

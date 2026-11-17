@@ -80,8 +80,22 @@ export interface EndpointResponse {
   max_latency_ms: number;
 }
 
+// handler_status.go QueueSummary. Present only while the request queue is
+// enabled. wait_total_ms and waits_completed are monotonic counters, so a
+// windowed mean wait comes from the difference between two samples.
+export interface QueueSummary {
+  wait_total_ms: number;
+  waits_completed: number;
+  timed_out: number;
+  rejected_full: number;
+  depth: number;
+  peak_depth: number;
+  max_size: number;
+}
+
 export interface StatusResponse {
   timestamp: string;
+  queue?: QueueSummary;
   proxy: ProxySummary;
   endpoints: EndpointResponse[];
   security: SecuritySummary;
@@ -226,4 +240,46 @@ export interface ProcessStatsResponse {
   };
   goroutines: { health_status: string; count: number };
   runtime: { uptime: string; go_version: string; num_cpu: number };
+}
+
+// /internal/stats/queue. {"enabled":false} when the queue is off, so every
+// other field is optional on the wire; parseQueue fills in safe defaults.
+export interface QueueEndpointStats {
+  name: string;
+  url: string;
+  slot_source: string;
+  slots: number;
+  in_use: number;
+}
+
+export interface QueueWaiter {
+  enqueued_at: string;
+  request_id: string;
+  client_ip: string;
+  model: string;
+  user_agent: string;
+  // "" when the request has no live sticky pin.
+  sticky_endpoint: string;
+  wait_ms: number;
+  candidates: number;
+}
+
+export interface QueueStatsResponse {
+  enabled: boolean;
+  endpoints: QueueEndpointStats[];
+  waiting: QueueWaiter[];
+  timeout_seconds: number;
+  avg_wait_ms: number;
+  max_wait_ms: number;
+  wait_total_ms: number;
+  waits_completed: number;
+  enqueued: number;
+  dispatched: number;
+  timed_out: number;
+  rejected_full: number;
+  cancelled: number;
+  failed: number;
+  depth: number;
+  peak_depth: number;
+  max_size: number;
 }

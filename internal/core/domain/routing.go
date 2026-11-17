@@ -119,6 +119,15 @@ type QueueOutcome struct {
 	Queued bool
 }
 
+// QueueCaller describes a request for the queue's live listing. The handler
+// fills it into the context before Select; the queue only reads it.
+type QueueCaller struct {
+	RequestID string
+	ClientIP  string
+	Model     string
+	UserAgent string
+}
+
 // StickyOutcome carries the result of a sticky session selection back to the
 // handler layer via context. The handler allocates it, passes it in context,
 // and the proxy engine reads it to write response headers before WriteHeader.

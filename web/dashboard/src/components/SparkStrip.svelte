@@ -41,6 +41,10 @@
   const step = $derived(view.length >= 2 ? W / (view.length - 1) : 0);
   const maxReq = $derived(Math.max(1, ...view.map((s) => s.reqPerSec)));
   const maxConn = $derived(Math.max(1, ...view.map((s) => s.activeConnections)));
+  // The queue line only exists while the queue is on: a sample from a build or
+  // config without it carries queueDepth null, which is not the same as 0.
+  const hasQueue = $derived(view.some((s) => !s.error && s.queueDepth !== null));
+  const maxQueue = $derived(Math.max(1, ...view.map((s) => s.queueDepth ?? 0)));
 
   // Ceiling label for the req/s axis: one decimal under 10, integer above.
   const maxReqLabel = $derived(maxReq < 10 ? maxReq.toFixed(1) : Math.round(maxReq).toString());
@@ -111,6 +115,7 @@
   const reqAreaD = $derived(buildArea(view, maxReq));
   const reqEdgeD = $derived(buildLine(view, (s) => s.reqPerSec, maxReq));
   const connLineD = $derived(buildLine(view, (s) => s.activeConnections, maxConn));
+  const queueLineD = $derived(hasQueue ? buildLine(view, (s) => s.queueDepth ?? 0, maxQueue) : '');
   const errorIndices = $derived(
     view.length >= 2
       ? view.map((s, i) => (s.error ? i : -1)).filter((i) => i >= 0)
@@ -173,7 +178,8 @@
   // Every sample is a healthy zero: an axis topped at 1.0 over a flat line
   // reads as a chart that has something to say. Say there is nothing yet.
   const idle = $derived(
-    !warming && view.every((s) => !s.error && s.reqPerSec === 0 && s.activeConnections === 0),
+    !warming &&
+      view.every((s) => !s.error && s.reqPerSec === 0 && s.activeConnections === 0 && !s.queueDepth),
   );
 
   // The SVG itself is hidden from AT (aria-hidden below); the chart container's
@@ -191,7 +197,9 @@
     latest
       ? latest.error
         ? `connection lost${outageSummary}`
-        : `${latest.reqPerSec.toFixed(1)} requests per second, ${fmtInt(latest.activeConnections)} active connections${outageSummary}`
+        : `${latest.reqPerSec.toFixed(1)} requests per second, ${fmtInt(latest.activeConnections)} active connections${
+            latest.queueDepth !== null ? `, ${fmtInt(latest.queueDepth)} queued` : ''
+          }${outageSummary}`
       : 'gathering telemetry',
   );
 
@@ -235,6 +243,7 @@
         <path class="spark-area" d={reqAreaD} />
         <path class="spark-edge" d={reqEdgeD} />
         <path class="spark-line" d={connLineD} />
+        {#if queueLineD}<path class="spark-queue" d={queueLineD} />{/if}
         {#each outages as o}
           <line class="spark-outage-edge" x1={o.downX} y1="0" x2={o.downX} y2={H} />
           {#if o.recovered}
@@ -253,7 +262,7 @@
         {#if hoverSample.error}
           connection lost · {fmtDuration(Date.now() - hoverSample.t)} ago
         {:else}
-          {hoverSample.reqPerSec.toFixed(1)} req/s · {fmtInt(hoverSample.activeConnections)} conns · {fmtDuration(Date.now() - hoverSample.t)} ago
+          {hoverSample.reqPerSec.toFixed(1)} req/s · {fmtInt(hoverSample.activeConnections)} conns{#if hoverSample.queueDepth !== null}{' · '}{fmtInt(hoverSample.queueDepth)} queued{/if} · {fmtDuration(Date.now() - hoverSample.t)} ago
         {/if}
       </div>
     {/if}
@@ -275,7 +284,7 @@
       {#if latest.error}
         connection lost
       {:else}
-        {latest.reqPerSec.toFixed(1)} req/s · {fmtInt(latest.activeConnections)} conns
+        {latest.reqPerSec.toFixed(1)} req/s · {fmtInt(latest.activeConnections)} conns{#if latest.queueDepth !== null}{' · '}<span class="spark-queue-text">{fmtInt(latest.queueDepth)} queued</span>{/if}
       {/if}
     {:else}
       &mdash;
@@ -319,6 +328,16 @@
     stroke: var(--blue);
     stroke-width: 1.5;
     vector-effect: non-scaling-stroke;
+  }
+  .spark-queue {
+    fill: none;
+    stroke: var(--amber);
+    stroke-width: 1.5;
+    stroke-dasharray: 3 2;
+    vector-effect: non-scaling-stroke;
+  }
+  .spark-queue-text {
+    color: var(--amber);
   }
   .spark-outage {
     fill: var(--red);

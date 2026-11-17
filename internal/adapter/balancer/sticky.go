@@ -141,6 +141,30 @@ func (s *StickySessionWrapper) Select(ctx context.Context, endpoints []*domain.E
 	return chosen, nil
 }
 
+// PinnedURLs returns the backend each of keys is pinned to, omitting keys with
+// no live pin. It walks the store with Range rather than calling Get per key:
+// Get would count as a hit or miss in the sticky stats and slide the TTL, and
+// a dashboard looking at the queue must not change either.
+func (s *StickySessionWrapper) PinnedURLs(keys []string) map[string]string {
+	want := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		if k != "" {
+			want[k] = struct{}{}
+		}
+	}
+	pins := make(map[string]string, len(want))
+	if len(want) == 0 {
+		return pins
+	}
+	s.store.Range(func(item *ttlcache.Item[string, string]) bool {
+		if _, ok := want[item.Key()]; ok {
+			pins[item.Key()] = item.Value()
+		}
+		return len(pins) < len(want)
+	})
+	return pins
+}
+
 // PurgeDeadEndpoints removes session entries that point to backends no longer
 // present in the provided routable set. Callers can invoke this periodically
 // (e.g. on health-check updates) to reclaim store capacity proactively.

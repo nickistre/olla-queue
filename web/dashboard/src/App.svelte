@@ -4,6 +4,7 @@
   import OverviewPanel from './panels/OverviewPanel.svelte';
   import EndpointsPanel from './panels/EndpointsPanel.svelte';
   import ModelsPanel from './panels/ModelsPanel.svelte';
+  import QueuePanel from './panels/QueuePanel.svelte';
   import { pollScheduler } from './lib/poll-scheduler';
   import { startClock } from './lib/clock.svelte';
   import { theme } from './lib/stores/theme.svelte';
@@ -61,5 +62,7 @@
     <EndpointsPanel />
   {:else if navigation.current === 'models'}
     <ModelsPanel />
+  {:else if navigation.current === 'queue'}
+    <QueuePanel />
   {/if}
 </DashboardLayout>

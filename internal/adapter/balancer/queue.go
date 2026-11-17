@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -56,8 +57,10 @@ type queueResult struct {
 type queueWaiter struct {
 	ctx        context.Context
 	enqueuedAt time.Time
-	ready      chan queueResult // buffered 1, written once under q.mu
-	elem       *list.Element    // nil once removed from the queue
+	caller     domain.QueueCaller // copied at enqueue for the stats listing
+	ready      chan queueResult   // buffered 1, written once under q.mu
+	elem       *list.Element      // nil once removed from the queue
+	stickyKey  string
 	candidates []*domain.Endpoint
 }
 
@@ -73,13 +76,16 @@ type queueWaiter struct {
 type QueueWrapper struct {
 	inner    domain.EndpointSelector
 	resolver SlotResolver
-	inUse    map[string]int
-	known    map[string]*domain.Endpoint
-	waiters  list.List
-	cfg      config.QueueConfig
-	stats    queueCounters
-	mu       sync.Mutex
-	closed   bool
+	// pinLookup maps sticky keys to pinned endpoint URLs for the stats
+	// listing. Optional: nil when sticky sessions are off.
+	pinLookup func(keys []string) map[string]string
+	inUse     map[string]int
+	known     map[string]*domain.Endpoint
+	waiters   list.List
+	cfg       config.QueueConfig
+	stats     queueCounters
+	mu        sync.Mutex
+	closed    bool
 }
 
 type queueCounters struct {
@@ -91,7 +97,10 @@ type queueCounters struct {
 	failed       atomic.Uint64
 	waitTotalNs  atomic.Int64
 	waitMaxNs    atomic.Int64
-	peakDepth    atomic.Int64
+	// waitsDone counts requests that have left the queue for any reason, the
+	// divisor for waitTotalNs. enqueued would over-count while some still wait.
+	waitsDone atomic.Uint64
+	peakDepth atomic.Int64
 }
 
 // NewQueueWrapper wraps inner with a slot-limited request queue. A nil resolver
@@ -175,6 +184,10 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 		ready:      make(chan queueResult, 1),
 		enqueuedAt: time.Now(),
 	}
+	if caller, ok := ctx.Value(constants.ContextQueueCallerKey).(*domain.QueueCaller); ok && caller != nil {
+		w.caller = *caller
+	}
+	w.stickyKey, _ = ctx.Value(constants.ContextStickyKeyKey).(string)
 	w.elem = q.waiters.PushBack(w)
 	depth := int64(q.waiters.Len())
 	q.mu.Unlock()
@@ -238,6 +251,7 @@ func (q *QueueWrapper) finishWait(w *queueWaiter, outcome *domain.QueueOutcome, 
 
 func (q *QueueWrapper) recordWait(outcome *domain.QueueOutcome, waited time.Duration) {
 	q.stats.waitTotalNs.Add(int64(waited))
+	q.stats.waitsDone.Add(1)
 	storeMax(&q.stats.waitMaxNs, int64(waited))
 	// Accumulate: a retry after a failed attempt may queue again, and the
 	// client cares about the total time spent waiting.
@@ -245,6 +259,14 @@ func (q *QueueWrapper) recordWait(outcome *domain.QueueOutcome, waited time.Dura
 		outcome.Queued = true
 		outcome.Wait += waited
 	}
+}
+
+// SetPinLookup lets the stats listing show which endpoint each queued
+// request's sticky session is pinned to.
+func (q *QueueWrapper) SetPinLookup(fn func(keys []string) map[string]string) {
+	q.mu.Lock()
+	q.pinLookup = fn
+	q.mu.Unlock()
 }
 
 // Wake runs a dispatch pass. Call it when slot capacity grows (e.g. a refresh
@@ -382,31 +404,55 @@ type QueueEndpointStats struct {
 	InUse      int    `json:"in_use"`
 }
 
+// QueueWaiterStats describes one request waiting in the queue.
+type QueueWaiterStats struct {
+	EnqueuedAt time.Time `json:"enqueued_at"`
+	RequestID  string    `json:"request_id"`
+	ClientIP   string    `json:"client_ip"`
+	Model      string    `json:"model"`
+	UserAgent  string    `json:"user_agent"`
+	// StickyEndpoint is empty when the request has no sticky session, or its
+	// pin has expired or points at an endpoint the queue has not seen.
+	StickyEndpoint string  `json:"sticky_endpoint"`
+	WaitMs         float64 `json:"wait_ms"`
+	Candidates     int     `json:"candidates"`
+}
+
 // QueueStats is a point-in-time snapshot of queue activity.
 type QueueStats struct {
 	Endpoints      []QueueEndpointStats `json:"endpoints"`
+	Waiting        []QueueWaiterStats   `json:"waiting"`
 	TimeoutSeconds float64              `json:"timeout_seconds"`
 	AvgWaitMs      float64              `json:"avg_wait_ms"`
 	MaxWaitMs      float64              `json:"max_wait_ms"`
-	Enqueued       uint64               `json:"enqueued"`
-	Dispatched     uint64               `json:"dispatched"`
-	TimedOut       uint64               `json:"timed_out"`
-	RejectedFull   uint64               `json:"rejected_full"`
-	Cancelled      uint64               `json:"cancelled"`
-	Failed         uint64               `json:"failed"`
-	Depth          int                  `json:"depth"`
-	PeakDepth      int                  `json:"peak_depth"`
-	MaxSize        int                  `json:"max_size"`
-	Enabled        bool                 `json:"enabled"`
+	// WaitTotalMs and WaitsCompleted are monotonic counters, so a poller can
+	// derive the mean wait over any window from two samples.
+	WaitTotalMs    float64 `json:"wait_total_ms"`
+	WaitsCompleted uint64  `json:"waits_completed"`
+	Enqueued       uint64  `json:"enqueued"`
+	Dispatched     uint64  `json:"dispatched"`
+	TimedOut       uint64  `json:"timed_out"`
+	RejectedFull   uint64  `json:"rejected_full"`
+	Cancelled      uint64  `json:"cancelled"`
+	Failed         uint64  `json:"failed"`
+	Depth          int     `json:"depth"`
+	PeakDepth      int     `json:"peak_depth"`
+	MaxSize        int     `json:"max_size"`
+	Enabled        bool    `json:"enabled"`
 }
 
-// Stats returns a snapshot of queue counters and per-endpoint slot usage.
+// Stats returns a snapshot of queue counters, per-endpoint slot usage and the
+// requests currently waiting, oldest first.
 func (q *QueueWrapper) Stats() QueueStats {
+	now := time.Now()
+
 	q.mu.Lock()
 	depth := q.waiters.Len()
 	eps := make([]QueueEndpointStats, 0, len(q.known))
+	names := make(map[string]string, len(q.known))
 	for url, ep := range q.known {
 		slots, source := q.resolver.Slots(ep)
+		names[url] = ep.Name
 		eps = append(eps, QueueEndpointStats{
 			Name:       ep.Name,
 			URL:        url,
@@ -415,12 +461,42 @@ func (q *QueueWrapper) Stats() QueueStats {
 			InUse:      q.inUse[url],
 		})
 	}
+	waiting := make([]QueueWaiterStats, 0, depth)
+	keys := make([]string, 0, depth)
+	for e := q.waiters.Front(); e != nil; e = e.Next() {
+		w := waiterAt(e)
+		waiting = append(waiting, QueueWaiterStats{
+			RequestID:  w.caller.RequestID,
+			ClientIP:   w.caller.ClientIP,
+			Model:      w.caller.Model,
+			UserAgent:  w.caller.UserAgent,
+			EnqueuedAt: w.enqueuedAt,
+			WaitMs:     float64(now.Sub(w.enqueuedAt)) / float64(time.Millisecond),
+			Candidates: len(w.candidates),
+		})
+		keys = append(keys, w.stickyKey)
+	}
+	pinLookup := q.pinLookup
 	q.mu.Unlock()
 
-	enqueued := q.stats.enqueued.Load()
+	sort.Slice(eps, func(i, j int) bool { return eps[i].Name < eps[j].Name })
+
+	// Pins are resolved outside q.mu: the lookup walks the whole sticky store,
+	// and dispatch must never wait on a dashboard poll.
+	if pinLookup != nil && len(waiting) > 0 {
+		pins := pinLookup(keys)
+		for i, k := range keys {
+			if url, ok := pins[k]; ok {
+				waiting[i].StickyEndpoint = names[url]
+			}
+		}
+	}
+
+	waitTotalNs := q.stats.waitTotalNs.Load()
+	done := q.stats.waitsDone.Load()
 	var avgMs float64
-	if enqueued > 0 {
-		avgMs = float64(q.stats.waitTotalNs.Load()) / float64(enqueued) / float64(time.Millisecond)
+	if done > 0 {
+		avgMs = float64(waitTotalNs) / float64(done) / float64(time.Millisecond)
 	}
 	return QueueStats{
 		Enabled:        true,
@@ -428,7 +504,7 @@ func (q *QueueWrapper) Stats() QueueStats {
 		PeakDepth:      int(q.stats.peakDepth.Load()),
 		MaxSize:        q.cfg.MaxSize,
 		TimeoutSeconds: q.cfg.Timeout.Seconds(),
-		Enqueued:       enqueued,
+		Enqueued:       q.stats.enqueued.Load(),
 		Dispatched:     q.stats.dispatched.Load(),
 		TimedOut:       q.stats.timedOut.Load(),
 		RejectedFull:   q.stats.rejectedFull.Load(),
@@ -436,6 +512,9 @@ func (q *QueueWrapper) Stats() QueueStats {
 		Failed:         q.stats.failed.Load(),
 		AvgWaitMs:      avgMs,
 		MaxWaitMs:      float64(q.stats.waitMaxNs.Load()) / float64(time.Millisecond),
+		WaitTotalMs:    float64(waitTotalNs) / float64(time.Millisecond),
+		WaitsCompleted: done,
 		Endpoints:      eps,
+		Waiting:        waiting,
 	}
 }

@@ -10,7 +10,9 @@
 // switching - that stays with NavTabs and the router (including App's
 // boot-time hash restore).
 
-export const SECTIONS = Object.freeze(['overview', 'endpoints', 'models'] as const);
+// 'queue' is always routable (a shared #queue link still resolves), but
+// NavTabs only shows its tab while the request queue is enabled.
+export const SECTIONS = Object.freeze(['overview', 'endpoints', 'models', 'queue'] as const);
 export type Section = (typeof SECTIONS)[number];
 
 class NavigationStore {

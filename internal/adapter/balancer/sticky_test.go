@@ -564,3 +564,21 @@ func TestNewStickySessionWrapper_ZeroTTL_NoPanic(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "miss", out.Result, "wrapper with zero TTL must still route requests")
 }
+
+func TestStickyPinnedURLs_DoesNotTouchStats(t *testing.T) {
+	w := makeWrapper(t, defaultStickyConfig())
+	a := makeEndpoint("a", "http://a:1")
+	ctx, _ := injectKey(context.Background(), "k1", "session_header")
+	if _, err := w.Select(ctx, []*domain.Endpoint{a}); err != nil {
+		t.Fatal(err)
+	}
+	before := w.Stats()
+
+	pins := w.PinnedURLs([]string{"k1", "missing", ""})
+	if pins["k1"] != "http://a:1" || len(pins) != 1 {
+		t.Fatalf("pins = %v", pins)
+	}
+	if after := w.Stats(); after.Hits != before.Hits || after.Misses != before.Misses {
+		t.Fatalf("lookup changed sticky stats: before %+v after %+v", before, after)
+	}
+}

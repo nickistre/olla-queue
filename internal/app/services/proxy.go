@@ -355,6 +355,9 @@ func (s *ProxyServiceWrapper) applyQueue() {
 	}
 
 	qw := balancer.NewQueueWrapper(s.loadBalancer, cfg, resolver)
+	if s.stickyWrapper != nil {
+		qw.SetPinLookup(s.stickyWrapper.PinnedURLs)
+	}
 	s.queueWrapper = qw
 	s.loadBalancer = qw
 

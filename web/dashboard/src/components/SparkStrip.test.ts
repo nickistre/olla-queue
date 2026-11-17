@@ -32,6 +32,9 @@ function makeSample(over: Partial<Sample> = {}): Sample {
     totalRequests: 0,
     totalBytes: 0,
     activeConnections: 0,
+    queueDepth: null,
+    queueWaitTotalMs: 0,
+    queueWaitsCompleted: 0,
     reqPerSec: 0,
     bytesPerSec: 0,
     ...over,
@@ -413,5 +416,27 @@ describe('SparkStrip outage markers', () => {
       ],
     });
     expect(document.querySelector('.spark-readout')?.textContent).toContain('connection lost');
+  });
+});
+
+describe('SparkStrip queue line', () => {
+  it('draws no queue line and no queued readout while the queue is off', () => {
+    render({ samples: [makeSample({ reqPerSec: 1 }), makeSample({ reqPerSec: 2 })] });
+    expect(document.querySelector('.spark-queue')).toBeNull();
+    expect(document.querySelector('.spark-readout')?.textContent).not.toContain('queued');
+  });
+
+  it('draws the queue line and reports depth when the queue is on', () => {
+    render({
+      samples: [makeSample({ reqPerSec: 1, queueDepth: 0 }), makeSample({ reqPerSec: 2, queueDepth: 4 })],
+    });
+    expect(document.querySelector('.spark-queue')?.getAttribute('d')).toBeTruthy();
+    expect(document.querySelector('.spark-readout')?.textContent).toContain('4 queued');
+    expect(document.querySelector('.spark-chart')?.getAttribute('aria-label')).toContain('4 queued');
+  });
+
+  it('does not call a queue with waiters idle', () => {
+    render({ samples: [makeSample({ queueDepth: 2 }), makeSample({ queueDepth: 3 })] });
+    expect(document.body.textContent).not.toContain('no recent traffic');
   });
 });

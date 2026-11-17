@@ -43,3 +43,32 @@ func TestQueueStatsHandler(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildQueueSummary(t *testing.T) {
+	if (&Application{}).buildQueueSummary() != nil {
+		t.Fatal("no provider: summary must be absent")
+	}
+	off := &Application{queueStatsFn: func() *balancer.QueueStats { return nil }}
+	if off.buildQueueSummary() != nil {
+		t.Fatal("queue disabled: summary must be absent")
+	}
+	on := &Application{queueStatsFn: func() *balancer.QueueStats {
+		return &balancer.QueueStats{Enabled: true, Depth: 4, MaxSize: 10, WaitTotalMs: 1500, WaitsCompleted: 3}
+	}}
+	s := on.buildQueueSummary()
+	if s == nil || s.Depth != 4 || s.WaitTotalMs != 1500 || s.WaitsCompleted != 3 {
+		t.Fatalf("summary = %+v", s)
+	}
+}
+
+func TestHashStatusResponse_QueueChangesETag(t *testing.T) {
+	base := StatusResponse{}
+	idle := StatusResponse{Queue: &QueueSummary{}}
+	busy := StatusResponse{Queue: &QueueSummary{Depth: 2}}
+	if hashStatusResponse(&base) == hashStatusResponse(&idle) {
+		t.Fatal("queue off and queue idle must not share an ETag")
+	}
+	if hashStatusResponse(&idle) == hashStatusResponse(&busy) {
+		t.Fatal("a change in queue depth must change the ETag")
+	}
+}

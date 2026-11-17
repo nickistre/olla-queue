@@ -12,7 +12,7 @@ import { navigation } from './stores/navigation.svelte';
 
 describe('router parse/serialize', () => {
   it('round-trips every panel-only route', () => {
-    for (const panel of ['overview', 'endpoints', 'models'] as const) {
+    for (const panel of ['overview', 'endpoints', 'models', 'queue'] as const) {
       const r = { panel };
       expect(parseHash(routeToHash(r))).toEqual(r);
     }

@@ -112,10 +112,25 @@ type SecurityViolation struct {
 }
 type StatusResponse struct {
 	Timestamp time.Time          `json:"timestamp"`
+	Queue     *QueueSummary      `json:"queue,omitempty"`
 	Proxy     ProxySummary       `json:"proxy"`
 	Endpoints []EndpointResponse `json:"endpoints"`
 	Security  SecuritySummary    `json:"security"`
 	System    SystemSummary      `json:"system"`
+}
+
+// QueueSummary rides on /internal/status so the dashboard's overview poll (and
+// the chart history built from it) gets queue depth without a second request.
+// Absent when the queue is disabled. The wait counters are monotonic so the
+// dashboard can take a windowed mean from two samples.
+type QueueSummary struct {
+	WaitTotalMs    float64 `json:"wait_total_ms"`
+	WaitsCompleted uint64  `json:"waits_completed"`
+	TimedOut       uint64  `json:"timed_out"`
+	RejectedFull   uint64  `json:"rejected_full"`
+	Depth          int     `json:"depth"`
+	PeakDepth      int     `json:"peak_depth"`
+	MaxSize        int     `json:"max_size"`
 }
 
 type statusSnapshot struct {
@@ -176,8 +191,28 @@ func (a *Application) buildStatusResponse(snapshot *statusSnapshot) StatusRespon
 	endpointIDs := buildEndpointIDs(snapshot.all)
 	a.buildUnifiedEndpoints(snapshot.all, snapshot.endpointStats, snapshot.connectionStats, response.Endpoints, snapshot.endpointModels, endpointIDs)
 	response.Security = a.buildSecuritySummary(snapshot.securityStats)
+	response.Queue = a.buildQueueSummary()
 
 	return response
+}
+
+func (a *Application) buildQueueSummary() *QueueSummary {
+	if a.queueStatsFn == nil {
+		return nil
+	}
+	qs := a.queueStatsFn()
+	if qs == nil {
+		return nil
+	}
+	return &QueueSummary{
+		Depth:          qs.Depth,
+		PeakDepth:      qs.PeakDepth,
+		MaxSize:        qs.MaxSize,
+		WaitTotalMs:    qs.WaitTotalMs,
+		WaitsCompleted: qs.WaitsCompleted,
+		TimedOut:       qs.TimedOut,
+		RejectedFull:   qs.RejectedFull,
+	}
 }
 
 func (a *Application) statusHandler(w http.ResponseWriter, r *http.Request) {
@@ -616,6 +651,20 @@ func hashStatusResponse(resp *StatusResponse) string {
 
 	for i := range resp.Endpoints {
 		hashEndpointResponse(h, &resp.Endpoints[i])
+	}
+
+	// Presence first, so "queue off" and "queue on but idle" hash differently.
+	if q := resp.Queue; q != nil {
+		hashEtagInt64(h, 1)
+		hashEtagInt64(h, int64(q.Depth))
+		hashEtagInt64(h, int64(q.PeakDepth))
+		hashEtagInt64(h, int64(q.MaxSize))
+		hashEtagInt64(h, int64(q.WaitTotalMs))
+		hashEtagInt64(h, int64(q.WaitsCompleted))
+		hashEtagInt64(h, int64(q.TimedOut))
+		hashEtagInt64(h, int64(q.RejectedFull))
+	} else {
+		hashEtagInt64(h, 0)
 	}
 	return formatEtag(h)
 }

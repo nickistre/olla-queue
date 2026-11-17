@@ -1,6 +1,14 @@
 // Pure view logic for the Runtime cards, kept out of the component so the
 // edge cases (divide-by-zero, off/empty payloads) are unit-testable.
-import type { ProcessStatsResponse, StickyStatsResponse, TranslatorStatsEntry, TranslatorStatsResponse } from './types';
+import type {
+  ProcessStatsResponse,
+  QueueEndpointStats,
+  QueueStatsResponse,
+  QueueWaiter,
+  StickyStatsResponse,
+  TranslatorStatsEntry,
+  TranslatorStatsResponse,
+} from './types';
 import { fmtInt, fmtPct } from './format';
 
 /** Sticky card is shown only for an enabled payload; {"enabled":false} hides it. */
@@ -153,5 +161,55 @@ export const parseProcess = guarded((raw: unknown): ProcessStatsResponse | null 
     garbage_collection: { avg_gc_pause: str(g.avg_gc_pause), num_gc_cycles: num(g.num_gc_cycles) },
     goroutines: { health_status: str(r.health_status), count: num(r.count) },
     runtime: { uptime: str(rt.uptime), go_version: str(rt.go_version), num_cpu: num(rt.num_cpu) },
+  };
+});
+
+// Go encodes an empty slice as [] here (make), but accept null/absent as empty
+// so an older or disabled-queue payload never counts as malformed.
+const arr = (v: unknown): unknown[] => {
+  if (v === undefined || v === null) return [];
+  if (!Array.isArray(v)) throw new BadPayload();
+  return v;
+};
+
+/** /internal/stats/queue. {"enabled":false} parses to an empty, disabled
+ *  snapshot so the panel can say the queue is off rather than erroring. */
+export const parseQueue = guarded((raw: unknown): QueueStatsResponse | null => {
+  if (!isObj(raw) || typeof raw.enabled !== 'boolean') return null;
+  const endpoints: QueueEndpointStats[] = arr(raw.endpoints).filter(isObj).map((e) => ({
+    name: str(e.name),
+    url: str(e.url),
+    slot_source: str(e.slot_source),
+    slots: num(e.slots),
+    in_use: num(e.in_use),
+  }));
+  const waiting: QueueWaiter[] = arr(raw.waiting).filter(isObj).map((w) => ({
+    enqueued_at: str(w.enqueued_at),
+    request_id: str(w.request_id),
+    client_ip: str(w.client_ip),
+    model: str(w.model),
+    user_agent: str(w.user_agent),
+    sticky_endpoint: str(w.sticky_endpoint),
+    wait_ms: num(w.wait_ms),
+    candidates: num(w.candidates),
+  }));
+  return {
+    enabled: raw.enabled,
+    endpoints,
+    waiting,
+    timeout_seconds: num(raw.timeout_seconds),
+    avg_wait_ms: num(raw.avg_wait_ms),
+    max_wait_ms: num(raw.max_wait_ms),
+    wait_total_ms: num(raw.wait_total_ms),
+    waits_completed: num(raw.waits_completed),
+    enqueued: num(raw.enqueued),
+    dispatched: num(raw.dispatched),
+    timed_out: num(raw.timed_out),
+    rejected_full: num(raw.rejected_full),
+    cancelled: num(raw.cancelled),
+    failed: num(raw.failed),
+    depth: num(raw.depth),
+    peak_depth: num(raw.peak_depth),
+    max_size: num(raw.max_size),
   };
 });

@@ -8,18 +8,23 @@ the build/release targets); this package owns only the SPA source.
 
 ## What it shows
 
-Three panels, each backed by an independent poll against Olla's `/internal/status*` JSON
-endpoints:
+Three panels, plus a fourth when the request queue is enabled, each backed by an independent
+poll against Olla's `/internal/*` JSON endpoints:
 
 | Panel     | Source                              | Interval |
 | --------- | ----------------------------------- | -------- |
 | Overview  | `/internal/status`                  | 5 s      |
 | Endpoints | `/internal/status/endpoints`        | 5 s      |
 | Models    | `/internal/status/models` (detailed) | 15 s     |
+| Queue     | `/internal/stats/queue`             | 5 s      |
 
 Overview also renders a live requests-per-second sparkline (`SparkStrip`), built from a
 rolling history of poll samples, with a hover readout and visible outage markers when a
-poll fails. Endpoints and Models support click-through: clicking a model's host pill jumps
+poll fails. While the request queue is on, `/internal/status` carries a `queue` summary: the
+sparkline adds a dashed queue-depth line, and Overview adds "Queued requests" and "Mean queue
+wait" tiles. The mean is taken over the sparkline's window from the monotonic wait counters, not
+since boot. The Queue tab only appears while the queue is on, and lists each waiting request
+with its client IP, model, sticky pin and entry time. Endpoints and Models support click-through: clicking a model's host pill jumps
 to and highlights that endpoint's row, and the current panel plus any jumped-to endpoint is
 reflected in the URL hash so a refresh or shared link restores the same view. Models also
 shows any configured aliases under each model name.
@@ -69,6 +74,7 @@ src/
     OverviewPanel.svelte           stat tiles, fleet-at-a-glance, SparkStrip
     EndpointsPanel.svelte          sortable table of every backend, deep-link target
     ModelsPanel.svelte             sortable table grouped by family, aliases, endpoint pills
+    QueuePanel.svelte              waiting requests and per-endpoint slot usage (queue enabled only)
   components/
     StatTile, StatusTag, RangeBar, PctBar, SortableTable, SparkStrip, ThemeToggle, StatusBanner
   lib/

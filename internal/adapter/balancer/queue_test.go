@@ -351,3 +351,60 @@ func TestQueue_StressNeverExceedsSlots(t *testing.T) {
 		}
 	}
 }
+
+func TestQueue_StatsListsWaitersWithCallerAndPin(t *testing.T) {
+	q := makeQueue(t, defaultQueueConfig())
+	a := makeEndpoint("node-a", "http://a:1")
+	eps := []*domain.Endpoint{a}
+	if _, err := q.Select(context.Background(), eps); err != nil {
+		t.Fatal(err)
+	}
+	q.SetPinLookup(func(keys []string) map[string]string {
+		out := map[string]string{}
+		for _, k := range keys {
+			if k == "pinned-key" {
+				out[k] = "http://a:1"
+			}
+		}
+		return out
+	})
+
+	enqueue := func(id, ip, key string) <-chan queueResult {
+		ctx := context.WithValue(context.Background(), constants.ContextQueueCallerKey,
+			&domain.QueueCaller{RequestID: id, ClientIP: ip, Model: "qwen", UserAgent: "curl/8"})
+		if key != "" {
+			ctx = context.WithValue(ctx, constants.ContextStickyKeyKey, key)
+		}
+		return selectAsync(ctx, q, eps)
+	}
+	first := enqueue("req-1", "10.0.0.5", "pinned-key")
+	waitForDepth(t, q, 1)
+	second := enqueue("req-2", "10.0.0.6", "")
+	waitForDepth(t, q, 2)
+
+	s := q.Stats()
+	if len(s.Waiting) != 2 {
+		t.Fatalf("waiting = %+v", s.Waiting)
+	}
+	w0, w1 := s.Waiting[0], s.Waiting[1]
+	if w0.RequestID != "req-1" || w0.ClientIP != "10.0.0.5" || w0.Model != "qwen" || w0.UserAgent != "curl/8" {
+		t.Fatalf("first waiter caller: %+v", w0)
+	}
+	if w0.StickyEndpoint != "node-a" {
+		t.Fatalf("first waiter should be pinned to node-a, got %q", w0.StickyEndpoint)
+	}
+	if w1.RequestID != "req-2" || w1.StickyEndpoint != "" {
+		t.Fatalf("second waiter: %+v", w1)
+	}
+	if w0.EnqueuedAt.After(w1.EnqueuedAt) || w0.Candidates != 1 {
+		t.Fatalf("listing should be oldest first: %+v", s.Waiting)
+	}
+
+	q.DecrementConnections(a)
+	mustReceive(t, first)
+	q.DecrementConnections(a)
+	mustReceive(t, second)
+	if s := q.Stats(); s.WaitsCompleted != 2 || s.WaitTotalMs <= 0 || len(s.Waiting) != 0 {
+		t.Fatalf("counters after drain: %+v", s)
+	}
+}

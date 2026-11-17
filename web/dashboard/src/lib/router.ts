@@ -8,6 +8,7 @@
 //   #overview                  panel only
 //   #endpoints                 panel only
 //   #models                    panel only
+//   #queue                     panel only
 //   #endpoints/ep-<stableId>   panel + targeted endpoint row
 //
 // Sync model: user-initiated nav (tab click, jump-to-endpoint) calls
