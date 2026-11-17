@@ -202,6 +202,7 @@ func (r *StaticEndpointRepository) LoadFromConfig(ctx context.Context, configs [
 			BackoffMultiplier:     1,
 			NextCheckTime:         now,
 			PreservePath:          cfg.PreservePath,
+			MaxConcurrent:         cfg.MaxConcurrent,
 		}
 
 		if cfg.Auth != nil {

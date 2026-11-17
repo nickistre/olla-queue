@@ -80,6 +80,19 @@ proxy:
       # - "ip"                  # client IP (opt-in; unreliable behind NAT/Docker)
     prefix_hash_bytes: 512      # how many leading bytes of the messages field to hash
 
+  # Request queue (opt-in)
+  # Caps in-flight requests per endpoint and holds the rest in a FIFO queue until
+  # a slot frees, instead of piling them onto a backend that queues invisibly.
+  # Slots per endpoint: endpoint max_concurrent > slots discovered from llama.cpp
+  # /props (or llama-swap's running models) > default_slots.
+  queue:
+    enabled: false
+    max_size: 100               # waiting requests beyond this get 503 + Retry-After
+    timeout: 60s                # max time a request waits for a slot (then 503)
+    default_slots: 1            # fallback when nothing better is known
+    discover_slots: true        # probe llama.cpp / llama-swap for total_slots
+    slot_refresh_interval: 30s
+
   # Failover: when a connection to a backend fails (refused, reset, network
   # unreachable), Olla marks that endpoint unhealthy and retries the request on
   # the other healthy endpoints. Timeouts and HTTP error statuses (5xx, 429) do

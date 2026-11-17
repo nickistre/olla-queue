@@ -238,6 +238,22 @@ type StickySessionConfig struct {
 	Enabled         bool `yaml:"enabled"`
 }
 
+// QueueConfig controls request queuing when every candidate endpoint is at its
+// concurrency limit. Requests wait (FIFO) for a slot instead of piling onto a
+// backend that will only queue them internally, invisible to Olla.
+type QueueConfig struct {
+	MaxSize int `yaml:"max_size"`
+	// DefaultSlots is the concurrency limit for endpoints with no max_concurrent
+	// set and no discovered slot count.
+	DefaultSlots int           `yaml:"default_slots"`
+	Timeout      time.Duration `yaml:"timeout"`
+	// SlotRefreshInterval controls how often slot counts are re-read from
+	// llama.cpp /props (or llama-swap's running models).
+	SlotRefreshInterval time.Duration `yaml:"slot_refresh_interval"`
+	Enabled             bool          `yaml:"enabled"`
+	DiscoverSlots       bool          `yaml:"discover_slots"`
+}
+
 // ProxyConfig holds proxy-specific configuration
 type ProxyConfig struct {
 	ProfileFilter         *domain.FilterConfig `yaml:"profile_filter,omitempty"`
@@ -245,6 +261,7 @@ type ProxyConfig struct {
 	LoadBalancer          string               `yaml:"load_balancer"`
 	Profile               string               `yaml:"profile"`
 	StickySessions        StickySessionConfig  `yaml:"sticky_sessions"`
+	Queue                 QueueConfig          `yaml:"queue"`
 	ConnectionTimeout     time.Duration        `yaml:"connection_timeout"`
 	ConnectionKeepAlive   time.Duration        `yaml:"connection_keep_alive"`
 	ResponseTimeout       time.Duration        `yaml:"response_timeout"`
@@ -321,7 +338,10 @@ type EndpointConfig struct {
 	ModelURL       string        `yaml:"model_url"`
 	CheckInterval  time.Duration `yaml:"check_interval"`
 	CheckTimeout   time.Duration `yaml:"check_timeout"`
-	PreservePath   bool          `yaml:"preserve_path"`
+	// MaxConcurrent caps in-flight requests when proxy.queue is enabled.
+	// 0 = resolve automatically (discovered slots, then queue.default_slots).
+	MaxConcurrent int  `yaml:"max_concurrent"`
+	PreservePath  bool `yaml:"preserve_path"`
 }
 
 // LoggingConfig holds logging configuration

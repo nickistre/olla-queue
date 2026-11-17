@@ -97,6 +97,14 @@ func DefaultConfig() *Config {
 				KeySources:      []string{"session_header", "prefix_hash", "auth_header"},
 				PrefixHashBytes: 512,
 			},
+			Queue: QueueConfig{
+				Enabled:             false,
+				MaxSize:             100,
+				Timeout:             60 * time.Second,
+				DefaultSlots:        1,
+				DiscoverSlots:       true,
+				SlotRefreshInterval: 30 * time.Second,
+			},
 		},
 		Discovery: DiscoveryConfig{
 			Type:            DefaultDiscoveryType,
@@ -195,6 +203,26 @@ func (c *Config) Validate() error {
 	}
 	if c.Proxy.Retry.MaxAttempts < 0 {
 		return fmt.Errorf("proxy.retry.max_attempts must be >= 0 (0 = every eligible endpoint once), got %d", c.Proxy.Retry.MaxAttempts)
+	}
+	if c.Proxy.Queue.Enabled {
+		q := c.Proxy.Queue
+		if q.MaxSize <= 0 {
+			return fmt.Errorf("proxy.queue.max_size must be > 0 when the queue is enabled, got %d", q.MaxSize)
+		}
+		if q.Timeout <= 0 {
+			return fmt.Errorf("proxy.queue.timeout must be > 0 when the queue is enabled, got %s", q.Timeout)
+		}
+		if q.DefaultSlots <= 0 {
+			return fmt.Errorf("proxy.queue.default_slots must be > 0 when the queue is enabled, got %d", q.DefaultSlots)
+		}
+		if q.DiscoverSlots && q.SlotRefreshInterval <= 0 {
+			return errors.New("proxy.queue.slot_refresh_interval must be > 0 when discover_slots is enabled (prevents ticker panic)")
+		}
+	}
+	for _, ep := range c.Discovery.Static.Endpoints {
+		if ep.MaxConcurrent < 0 {
+			return fmt.Errorf("endpoint %q max_concurrent must be >= 0 (0 = automatic), got %d", ep.Name, ep.MaxConcurrent)
+		}
 	}
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port must be between 1 and 65535, got %d", c.Server.Port)
@@ -426,6 +454,21 @@ func applyEnvOverrides(config *Config) {
 	if val := os.Getenv("OLLA_PROXY_STICKY_SESSIONS_ENABLED"); val != "" {
 		if enabled, err := strconv.ParseBool(val); err == nil {
 			config.Proxy.StickySessions.Enabled = enabled
+		}
+	}
+	if val := os.Getenv("OLLA_PROXY_QUEUE_ENABLED"); val != "" {
+		if enabled, err := strconv.ParseBool(val); err == nil {
+			config.Proxy.Queue.Enabled = enabled
+		}
+	}
+	if val := os.Getenv("OLLA_PROXY_QUEUE_MAX_SIZE"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil {
+			config.Proxy.Queue.MaxSize = n
+		}
+	}
+	if val := os.Getenv("OLLA_PROXY_QUEUE_TIMEOUT"); val != "" {
+		if duration, err := time.ParseDuration(val); err == nil {
+			config.Proxy.Queue.Timeout = duration
 		}
 	}
 	if val := os.Getenv("OLLA_PROXY_RETRY_ENABLED"); val != "" {

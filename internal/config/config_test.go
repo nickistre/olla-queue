@@ -1642,3 +1642,61 @@ func TestEnvOverride_ModelUnifierEnabled(t *testing.T) {
 		t.Error("OLLA_MODEL_UNIFIER_ENABLED=false did not flip ModelRegistry.EnableUnifier")
 	}
 }
+
+func TestQueueConfig_Validate(t *testing.T) {
+	cases := []struct {
+		modify  func(*Config)
+		name    string
+		wantErr bool
+	}{
+		{name: "disabled by default", modify: func(c *Config) {}},
+		{name: "enabled with defaults", modify: func(c *Config) { c.Proxy.Queue.Enabled = true }},
+		{name: "zero max_size", wantErr: true, modify: func(c *Config) {
+			c.Proxy.Queue.Enabled = true
+			c.Proxy.Queue.MaxSize = 0
+		}},
+		{name: "zero timeout", wantErr: true, modify: func(c *Config) {
+			c.Proxy.Queue.Enabled = true
+			c.Proxy.Queue.Timeout = 0
+		}},
+		{name: "zero default_slots", wantErr: true, modify: func(c *Config) {
+			c.Proxy.Queue.Enabled = true
+			c.Proxy.Queue.DefaultSlots = 0
+		}},
+		{name: "discovery without refresh interval", wantErr: true, modify: func(c *Config) {
+			c.Proxy.Queue.Enabled = true
+			c.Proxy.Queue.SlotRefreshInterval = 0
+		}},
+		{name: "invalid values ignored while disabled", modify: func(c *Config) { c.Proxy.Queue.MaxSize = 0 }},
+		{name: "negative max_concurrent", wantErr: true, modify: func(c *Config) {
+			c.Discovery.Static.Endpoints[0].MaxConcurrent = -1
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			tc.modify(cfg)
+			err := cfg.Validate()
+			if tc.wantErr && err == nil {
+				t.Fatal("expected a validation error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_QueueEnvOverrides(t *testing.T) {
+	t.Setenv("OLLA_PROXY_QUEUE_ENABLED", "true")
+	t.Setenv("OLLA_PROXY_QUEUE_MAX_SIZE", "7")
+	t.Setenv("OLLA_PROXY_QUEUE_TIMEOUT", "5s")
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Proxy.Queue.Enabled || cfg.Proxy.Queue.MaxSize != 7 || cfg.Proxy.Queue.Timeout != 5*time.Second {
+		t.Fatalf("queue env overrides not applied: %+v", cfg.Proxy.Queue)
+	}
+}

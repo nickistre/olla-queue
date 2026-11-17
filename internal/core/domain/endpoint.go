@@ -44,11 +44,13 @@ type Endpoint struct {
 	AuthHeaderName string `json:"-"`
 	// AuthHeaderValue is the fully composed header value (e.g. "Bearer tok", "Basic base64(...)").
 	// Never serialised; leaking credentials through logs or status endpoints would be a security issue.
-	AuthHeaderValue     string `json:"-"`
-	LastLatency         time.Duration
-	CheckInterval       time.Duration
-	CheckTimeout        time.Duration
-	Priority            int
+	AuthHeaderValue string `json:"-"`
+	LastLatency     time.Duration
+	CheckInterval   time.Duration
+	CheckTimeout    time.Duration
+	Priority        int
+	// MaxConcurrent is the configured slot override for the request queue; 0 = automatic.
+	MaxConcurrent       int
 	ConsecutiveFailures int
 	BackoffMultiplier   int
 	PreservePath        bool
