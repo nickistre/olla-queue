@@ -33,7 +33,10 @@ type ProxyServiceWrapper struct {
 	loadBalancer domain.EndpointSelector
 	// stickyWrapper is non-nil when sticky sessions are enabled; held separately
 	// so Stop() can shut down its background goroutine.
-	stickyWrapper    *balancer.StickySessionWrapper
+	stickyWrapper *balancer.StickySessionWrapper
+	// queueWrapper and slotDiscoverer are non-nil when proxy.queue is enabled.
+	queueWrapper     *balancer.QueueWrapper
+	slotDiscoverer   *balancer.SlotDiscoverer
 	endpointRepo     domain.EndpointRepository
 	discoveryService ports.DiscoveryService
 	statsCollector   ports.StatsCollector
@@ -96,6 +99,7 @@ func (s *ProxyServiceWrapper) Start(ctx context.Context) error {
 	s.logger.Info("Load balancer created", "type", s.config.LoadBalancer)
 
 	s.applyStickySessions()
+	s.applyQueue()
 
 	// Create proxy configuration
 	proxyConfig := s.createProxyConfiguration()
@@ -170,6 +174,14 @@ func (s *ProxyServiceWrapper) Stop(ctx context.Context) error {
 	if s.stickyWrapper != nil {
 		s.stickyWrapper.Stop()
 	}
+	if s.slotDiscoverer != nil {
+		s.slotDiscoverer.Stop()
+	}
+	if s.queueWrapper != nil {
+		// Queued requests get a 503 now rather than hanging until the server
+		// shutdown deadline cuts them off.
+		s.queueWrapper.Stop()
+	}
 
 	// Call Cleanup on the proxy engine if it supports it. This stops the
 	// cleanupLoop goroutine and releases per-endpoint connection pools,
@@ -242,11 +254,25 @@ func (s *ProxyServiceWrapper) StickyStats() *balancer.StickyStats {
 	return &stats
 }
 
+// QueueStats returns a point-in-time snapshot of request queue metrics,
+// or nil when the queue is disabled or not yet initialised.
+func (s *ProxyServiceWrapper) QueueStats() *balancer.QueueStats {
+	if s.queueWrapper == nil {
+		return nil
+	}
+	stats := s.queueWrapper.Stats()
+	return &stats
+}
+
 // PurgeDeadEndpoints removes sticky session entries that point to backends absent
-// from the routable set. It is a no-op when sticky sessions are disabled.
+// from the routable set, and fails queued requests left with no routable backend.
+// It is a no-op when neither sticky sessions nor the queue is enabled.
 func (s *ProxyServiceWrapper) PurgeDeadEndpoints(routable []*domain.Endpoint) {
 	if s.stickyWrapper != nil {
 		s.stickyWrapper.PurgeDeadEndpoints(routable)
+	}
+	if s.queueWrapper != nil {
+		s.queueWrapper.PurgeDeadEndpoints(routable)
 	}
 }
 
@@ -309,6 +335,40 @@ func (s *ProxyServiceWrapper) applyStickySessions() {
 	// stickyWrapper is now initialised — register the purge hook so that sticky
 	// session entries for dead backends are evicted on health-check failure rather
 	// than waiting for the session TTL to expire.
+	if s.discoverySvc != nil {
+		s.discoverySvc.SetPurgeDeadEndpointsFn(s.PurgeDeadEndpoints)
+	}
+}
+
+// applyQueue wraps the load balancer (outermost, so sticky and the strategy only
+// ever choose among endpoints with a free slot) with the request queue.
+func (s *ProxyServiceWrapper) applyQueue() {
+	cfg := s.config.Queue
+	if !cfg.Enabled {
+		return
+	}
+
+	var resolver balancer.SlotResolver
+	if cfg.DiscoverSlots && s.endpointRepo != nil {
+		s.slotDiscoverer = balancer.NewSlotDiscoverer(s.endpointRepo.GetAll, cfg.DefaultSlots, cfg.SlotRefreshInterval, nil)
+		resolver = s.slotDiscoverer
+	}
+
+	qw := balancer.NewQueueWrapper(s.loadBalancer, cfg, resolver)
+	s.queueWrapper = qw
+	s.loadBalancer = qw
+
+	if s.slotDiscoverer != nil {
+		s.slotDiscoverer.SetOnChange(qw.Wake)
+		s.slotDiscoverer.Start()
+	}
+
+	s.logger.Info("Request queue enabled",
+		"max_size", cfg.MaxSize,
+		"timeout", cfg.Timeout,
+		"default_slots", cfg.DefaultSlots,
+		"discover_slots", cfg.DiscoverSlots)
+
 	if s.discoverySvc != nil {
 		s.discoverySvc.SetPurgeDeadEndpointsFn(s.PurgeDeadEndpoints)
 	}

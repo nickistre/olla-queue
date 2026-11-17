@@ -17,6 +17,7 @@ Internal endpoints for health monitoring, system status, and process information
 | GET | `/internal/stats/models` | Model usage statistics |
 | GET | `/internal/stats/translators` | Translator usage and performance statistics |
 | GET | `/internal/stats/sticky` | Sticky session statistics (returns `{"enabled":false}` when sticky sessions are disabled) |
+| GET | `/internal/stats/queue` | Request queue depth, wait times and per-endpoint slot usage (returns `{"enabled":false}` when the queue is disabled) |
 | GET | `/internal/process` | Process information and metrics |
 
 ---

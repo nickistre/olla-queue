@@ -1,0 +1,435 @@
+package balancer
+
+import (
+	"container/list"
+	"context"
+	"errors"
+	"log/slog"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/thushan/olla/internal/config"
+	"github.com/thushan/olla/internal/core/constants"
+	"github.com/thushan/olla/internal/core/domain"
+)
+
+var (
+	// ErrQueueFull is returned when the wait queue is at max_size.
+	ErrQueueFull = errors.New("request queue full")
+	// ErrQueueTimeout is returned when a request waits longer than queue.timeout.
+	ErrQueueTimeout = errors.New("timed out waiting in request queue")
+	// ErrQueueClosed is returned to waiters still queued at shutdown.
+	ErrQueueClosed = errors.New("request queue closed")
+	// ErrQueueEndpointsGone is returned when every candidate of a queued request
+	// went non-routable while it waited, so no slot can ever open for it.
+	ErrQueueEndpointsGone = errors.New("no routable endpoints left for queued request")
+)
+
+// Slot sources reported in stats so operators can see where a limit came from.
+const (
+	SlotSourceConfig     = "config"
+	SlotSourceDiscovered = "discovered"
+	SlotSourceDefault    = "default"
+)
+
+// SlotResolver reports the concurrency limit for an endpoint and where it came from.
+type SlotResolver interface {
+	Slots(ep *domain.Endpoint) (slots int, source string)
+}
+
+// staticSlots resolves from endpoint config only, falling back to a fixed default.
+type staticSlots struct{ fallback int }
+
+func (s staticSlots) Slots(ep *domain.Endpoint) (int, string) {
+	if ep.MaxConcurrent > 0 {
+		return ep.MaxConcurrent, SlotSourceConfig
+	}
+	return s.fallback, SlotSourceDefault
+}
+
+type queueResult struct {
+	endpoint *domain.Endpoint
+	err      error
+}
+
+type queueWaiter struct {
+	ctx        context.Context
+	enqueuedAt time.Time
+	ready      chan queueResult // buffered 1, written once under q.mu
+	elem       *list.Element    // nil once removed from the queue
+	candidates []*domain.Endpoint
+}
+
+// QueueWrapper is a decorator that caps in-flight requests per endpoint and
+// parks the overflow in a FIFO queue until a slot frees.
+//
+// The slot is reserved inside Select, not IncrementConnections, so choosing an
+// endpoint and claiming capacity on it is one atomic step. The retry handler
+// always pairs a successful Select with exactly one DecrementConnections, which
+// is where the slot is released and the next waiter dispatched. There is no
+// dispatcher goroutine: dispatch runs on the two events that can make progress
+// possible (a slot freeing, or capacity growing).
+type QueueWrapper struct {
+	inner    domain.EndpointSelector
+	resolver SlotResolver
+	inUse    map[string]int
+	known    map[string]*domain.Endpoint
+	waiters  list.List
+	cfg      config.QueueConfig
+	stats    queueCounters
+	mu       sync.Mutex
+	closed   bool
+}
+
+type queueCounters struct {
+	enqueued     atomic.Uint64
+	dispatched   atomic.Uint64
+	timedOut     atomic.Uint64
+	rejectedFull atomic.Uint64
+	cancelled    atomic.Uint64
+	failed       atomic.Uint64
+	waitTotalNs  atomic.Int64
+	waitMaxNs    atomic.Int64
+	peakDepth    atomic.Int64
+}
+
+// NewQueueWrapper wraps inner with a slot-limited request queue. A nil resolver
+// uses endpoint max_concurrent, then cfg.DefaultSlots.
+func NewQueueWrapper(inner domain.EndpointSelector, cfg config.QueueConfig, resolver SlotResolver) *QueueWrapper {
+	if cfg.DefaultSlots <= 0 {
+		cfg.DefaultSlots = 1
+	}
+	if resolver == nil {
+		resolver = staticSlots{fallback: cfg.DefaultSlots}
+	}
+	return &QueueWrapper{
+		inner:    inner,
+		resolver: resolver,
+		cfg:      cfg,
+		inUse:    make(map[string]int),
+		known:    make(map[string]*domain.Endpoint),
+	}
+}
+
+// Name composes the inner balancer name.
+func (q *QueueWrapper) Name() string {
+	return "queue(" + q.inner.Name() + ")"
+}
+
+// IncrementConnections delegates for connection stats; the slot was already
+// reserved by Select.
+func (q *QueueWrapper) IncrementConnections(endpoint *domain.Endpoint) {
+	q.inner.IncrementConnections(endpoint)
+}
+
+// DecrementConnections releases the slot reserved by Select and hands it to
+// the oldest waiter that can use it.
+func (q *QueueWrapper) DecrementConnections(endpoint *domain.Endpoint) {
+	q.inner.DecrementConnections(endpoint)
+
+	q.mu.Lock()
+	q.releaseLocked(endpoint.URLString)
+	q.dispatchLocked()
+	q.mu.Unlock()
+}
+
+// Select returns an endpoint with a free slot, waiting in FIFO order if none
+// has one. The wait ends on dispatch, ctx cancellation (client gone) or
+// queue.timeout.
+func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint) (*domain.Endpoint, error) {
+	outcome, _ := ctx.Value(constants.ContextQueueOutcomeKey).(*domain.QueueOutcome)
+
+	q.mu.Lock()
+	if q.closed {
+		q.mu.Unlock()
+		return nil, ErrQueueClosed
+	}
+	for _, ep := range endpoints {
+		q.known[ep.URLString] = ep
+	}
+
+	// Taking a free slot straight away is always fair: every dispatch pass leaves
+	// no waiter with a free candidate, so any slot free now is one no waiter can use.
+	if free := q.freeLocked(endpoints); len(free) > 0 {
+		ep, err := q.reserveLocked(ctx, free)
+		q.mu.Unlock()
+		return ep, err
+	}
+
+	if !q.anyRoutable(endpoints) {
+		q.mu.Unlock()
+		// Nothing to wait for; let the inner selector produce its usual error.
+		return q.inner.Select(ctx, endpoints)
+	}
+
+	if q.waiters.Len() >= q.cfg.MaxSize {
+		q.mu.Unlock()
+		q.stats.rejectedFull.Add(1)
+		return nil, ErrQueueFull
+	}
+
+	w := &queueWaiter{
+		ctx:        ctx,
+		candidates: endpoints,
+		ready:      make(chan queueResult, 1),
+		enqueuedAt: time.Now(),
+	}
+	w.elem = q.waiters.PushBack(w)
+	depth := int64(q.waiters.Len())
+	q.mu.Unlock()
+
+	q.stats.enqueued.Add(1)
+	storeMax(&q.stats.peakDepth, depth)
+	slog.Debug("request queued", "depth", depth, "candidates", len(endpoints))
+
+	timer := time.NewTimer(q.cfg.Timeout)
+	defer timer.Stop()
+
+	var waitErr error
+	select {
+	case res := <-w.ready:
+		return q.finishWait(w, outcome, res)
+	case <-ctx.Done():
+		waitErr = ctx.Err()
+	case <-timer.C:
+		waitErr = ErrQueueTimeout
+	}
+
+	q.mu.Lock()
+	if w.elem != nil {
+		q.waiters.Remove(w.elem)
+		w.elem = nil
+		q.mu.Unlock()
+		if errors.Is(waitErr, ErrQueueTimeout) {
+			q.stats.timedOut.Add(1)
+		} else {
+			q.stats.cancelled.Add(1)
+		}
+		q.recordWait(outcome, time.Since(w.enqueuedAt))
+		return nil, waitErr
+	}
+	q.mu.Unlock()
+
+	// Dispatch won the race: a slot is already reserved for us. Using it is
+	// pointless if the client has gone, so hand it straight back.
+	res := <-w.ready
+	if res.err == nil && ctx.Err() != nil {
+		q.mu.Lock()
+		q.releaseLocked(res.endpoint.URLString)
+		q.dispatchLocked()
+		q.mu.Unlock()
+		q.stats.cancelled.Add(1)
+		return nil, ctx.Err()
+	}
+	return q.finishWait(w, outcome, res)
+}
+
+func (q *QueueWrapper) finishWait(w *queueWaiter, outcome *domain.QueueOutcome, res queueResult) (*domain.Endpoint, error) {
+	waited := time.Since(w.enqueuedAt)
+	q.recordWait(outcome, waited)
+	if res.err != nil {
+		return nil, res.err
+	}
+	q.stats.dispatched.Add(1)
+	slog.Debug("queued request dispatched", "endpoint", res.endpoint.Name, "wait", waited)
+	return res.endpoint, nil
+}
+
+func (q *QueueWrapper) recordWait(outcome *domain.QueueOutcome, waited time.Duration) {
+	q.stats.waitTotalNs.Add(int64(waited))
+	storeMax(&q.stats.waitMaxNs, int64(waited))
+	// Accumulate: a retry after a failed attempt may queue again, and the
+	// client cares about the total time spent waiting.
+	if outcome != nil {
+		outcome.Queued = true
+		outcome.Wait += waited
+	}
+}
+
+// Wake runs a dispatch pass. Call it when slot capacity grows (e.g. a refresh
+// discovered more slots) so waiters don't sit idle until the next release.
+func (q *QueueWrapper) Wake() {
+	q.mu.Lock()
+	q.dispatchLocked()
+	q.mu.Unlock()
+}
+
+// PurgeDeadEndpoints fails queued requests whose candidates are all outside the
+// routable set, so they get an answer now instead of waiting out the timeout.
+func (q *QueueWrapper) PurgeDeadEndpoints(routable []*domain.Endpoint) {
+	alive := make(map[string]struct{}, len(routable))
+	for _, ep := range routable {
+		alive[ep.URLString] = struct{}{}
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for e := q.waiters.Front(); e != nil; {
+		next := e.Next()
+		w := e.Value.(*queueWaiter)
+		hasAlive := false
+		for _, ep := range w.candidates {
+			if _, ok := alive[ep.URLString]; ok {
+				hasAlive = true
+				break
+			}
+		}
+		if !hasAlive {
+			q.completeLocked(w, queueResult{err: ErrQueueEndpointsGone})
+			q.stats.failed.Add(1)
+		}
+		e = next
+	}
+}
+
+// Stop fails every queued request and rejects new ones. Safe to call more than once.
+func (q *QueueWrapper) Stop() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.closed = true
+	for e := q.waiters.Front(); e != nil; {
+		next := e.Next()
+		q.completeLocked(e.Value.(*queueWaiter), queueResult{err: ErrQueueClosed})
+		e = next
+	}
+}
+
+// dispatchLocked walks the queue oldest-first and hands a slot to every waiter
+// that has a free candidate. A waiter whose candidates are all full is skipped
+// rather than blocking the line, so a request for a busy model never holds up
+// one for an idle model.
+func (q *QueueWrapper) dispatchLocked() {
+	for e := q.waiters.Front(); e != nil; {
+		next := e.Next()
+		w := e.Value.(*queueWaiter)
+		if free := q.freeLocked(w.candidates); len(free) > 0 {
+			ep, err := q.reserveLocked(w.ctx, free)
+			q.completeLocked(w, queueResult{endpoint: ep, err: err})
+		}
+		e = next
+	}
+}
+
+func (q *QueueWrapper) completeLocked(w *queueWaiter, res queueResult) {
+	q.waiters.Remove(w.elem)
+	w.elem = nil
+	w.ready <- res
+}
+
+// reserveLocked lets the inner strategy pick among free endpoints, then claims a slot.
+func (q *QueueWrapper) reserveLocked(ctx context.Context, free []*domain.Endpoint) (*domain.Endpoint, error) {
+	ep, err := q.inner.Select(ctx, free)
+	if err != nil {
+		return nil, err
+	}
+	q.inUse[ep.URLString]++
+	return ep, nil
+}
+
+func (q *QueueWrapper) releaseLocked(url string) {
+	// Guard against a stray decrement driving the count negative and
+	// permanently over-admitting that endpoint.
+	if q.inUse[url] > 0 {
+		q.inUse[url]--
+	}
+}
+
+func (q *QueueWrapper) freeLocked(endpoints []*domain.Endpoint) []*domain.Endpoint {
+	var free []*domain.Endpoint
+	for _, ep := range endpoints {
+		if !ep.Status.IsRoutable() {
+			continue
+		}
+		slots, _ := q.resolver.Slots(ep)
+		if q.inUse[ep.URLString] < slots {
+			free = append(free, ep)
+		}
+	}
+	return free
+}
+
+func (q *QueueWrapper) anyRoutable(endpoints []*domain.Endpoint) bool {
+	for _, ep := range endpoints {
+		if ep.Status.IsRoutable() {
+			return true
+		}
+	}
+	return false
+}
+
+func storeMax(v *atomic.Int64, n int64) {
+	for {
+		cur := v.Load()
+		if n <= cur || v.CompareAndSwap(cur, n) {
+			return
+		}
+	}
+}
+
+// QueueEndpointStats is the per-endpoint slot view.
+type QueueEndpointStats struct {
+	Name       string `json:"name"`
+	URL        string `json:"url"`
+	SlotSource string `json:"slot_source"`
+	Slots      int    `json:"slots"`
+	InUse      int    `json:"in_use"`
+}
+
+// QueueStats is a point-in-time snapshot of queue activity.
+type QueueStats struct {
+	Endpoints      []QueueEndpointStats `json:"endpoints"`
+	TimeoutSeconds float64              `json:"timeout_seconds"`
+	AvgWaitMs      float64              `json:"avg_wait_ms"`
+	MaxWaitMs      float64              `json:"max_wait_ms"`
+	Enqueued       uint64               `json:"enqueued"`
+	Dispatched     uint64               `json:"dispatched"`
+	TimedOut       uint64               `json:"timed_out"`
+	RejectedFull   uint64               `json:"rejected_full"`
+	Cancelled      uint64               `json:"cancelled"`
+	Failed         uint64               `json:"failed"`
+	Depth          int                  `json:"depth"`
+	PeakDepth      int                  `json:"peak_depth"`
+	MaxSize        int                  `json:"max_size"`
+	Enabled        bool                 `json:"enabled"`
+}
+
+// Stats returns a snapshot of queue counters and per-endpoint slot usage.
+func (q *QueueWrapper) Stats() QueueStats {
+	q.mu.Lock()
+	depth := q.waiters.Len()
+	eps := make([]QueueEndpointStats, 0, len(q.known))
+	for url, ep := range q.known {
+		slots, source := q.resolver.Slots(ep)
+		eps = append(eps, QueueEndpointStats{
+			Name:       ep.Name,
+			URL:        url,
+			Slots:      slots,
+			SlotSource: source,
+			InUse:      q.inUse[url],
+		})
+	}
+	q.mu.Unlock()
+
+	enqueued := q.stats.enqueued.Load()
+	var avgMs float64
+	if enqueued > 0 {
+		avgMs = float64(q.stats.waitTotalNs.Load()) / float64(enqueued) / float64(time.Millisecond)
+	}
+	return QueueStats{
+		Enabled:        true,
+		Depth:          depth,
+		PeakDepth:      int(q.stats.peakDepth.Load()),
+		MaxSize:        q.cfg.MaxSize,
+		TimeoutSeconds: q.cfg.Timeout.Seconds(),
+		Enqueued:       enqueued,
+		Dispatched:     q.stats.dispatched.Load(),
+		TimedOut:       q.stats.timedOut.Load(),
+		RejectedFull:   q.stats.rejectedFull.Load(),
+		Cancelled:      q.stats.cancelled.Load(),
+		Failed:         q.stats.failed.Load(),
+		AvgWaitMs:      avgMs,
+		MaxWaitMs:      float64(q.stats.waitMaxNs.Load()) / float64(time.Millisecond),
+		Endpoints:      eps,
+	}
+}

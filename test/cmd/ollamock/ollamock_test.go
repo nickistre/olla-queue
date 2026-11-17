@@ -1144,3 +1144,58 @@ func TestLMStudioModelsReportsFamily(t *testing.T) {
 		}
 	}
 }
+
+func TestPropsTotalSlots(t *testing.T) {
+	t.Parallel()
+
+	// Without --total-slots, /props falls through to the root handler, which
+	// must not look like a llama.cpp props payload.
+	off := testServer(t)
+	resp := getURL(t, off.URL+"/props")
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(raw), "total_slots") {
+		t.Fatal("/props should not report total_slots without --total-slots")
+	}
+
+	srv := newServer(serverConfig{name: "slots", models: []string{"test-model"}, totalSlots: 3})
+	ts := httptest.NewServer(srv.handler())
+	t.Cleanup(ts.Close)
+
+	var props struct {
+		TotalSlots int `json:"total_slots"`
+	}
+	decodeJSON(t, getURL(t, ts.URL+"/props"), &props)
+	if props.TotalSlots != 3 {
+		t.Fatalf("total_slots = %d, want 3", props.TotalSlots)
+	}
+}
+
+func TestMockStatsPeakInFlight(t *testing.T) {
+	t.Parallel()
+	ts := testServer(t)
+	postJSON(t, ts.URL+"/_mock/behaviour", `{"mode":"slow","latency_ms":100}`).Body.Close()
+
+	const concurrent = 3
+	done := make(chan struct{}, concurrent)
+	for range concurrent {
+		go func() {
+			resp := postJSON(t, ts.URL+"/v1/chat/completions",
+				`{"model":"test-model","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+			resp.Body.Close()
+			done <- struct{}{}
+		}()
+	}
+	for range concurrent {
+		<-done
+	}
+
+	var stats struct {
+		InFlight     int64 `json:"in_flight"`
+		PeakInFlight int64 `json:"peak_in_flight"`
+	}
+	decodeJSON(t, getURL(t, ts.URL+"/_mock/stats"), &stats)
+	if stats.PeakInFlight != concurrent || stats.InFlight != 0 {
+		t.Fatalf("want peak %d and nothing in flight, got %+v", concurrent, stats)
+	}
+}

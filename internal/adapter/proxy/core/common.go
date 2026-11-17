@@ -260,6 +260,16 @@ func SetStickySessionHeaders(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// SetQueueHeaders writes X-Olla-Queue-Wait-Ms when the request waited in the
+// request queue. Like SetStickySessionHeaders, it must run before WriteHeader.
+func SetQueueHeaders(w http.ResponseWriter, r *http.Request) {
+	outcome, _ := r.Context().Value(constants.ContextQueueOutcomeKey).(*domain.QueueOutcome)
+	if outcome == nil || !outcome.Queued {
+		return
+	}
+	w.Header().Set(constants.HeaderXOllaQueueWaitMs, strconv.FormatInt(outcome.Wait.Milliseconds(), 10))
+}
+
 // SetResponseHeaders sets common response headers
 func SetResponseHeaders(w http.ResponseWriter, stats *ports.RequestStats, endpoint *domain.Endpoint) {
 	h := w.Header()

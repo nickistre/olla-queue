@@ -115,4 +115,5 @@ const (
 	HeaderXOllaSessionID       = "X-Olla-Session-ID"        // client-supplied or echoed session identifier
 	HeaderXOllaStickySession   = "X-Olla-Sticky-Session"    // hit | miss | repin | disabled
 	HeaderXOllaStickyKeySource = "X-Olla-Sticky-Key-Source" // session_header | prefix_hash | auth_header | ip | none
+	HeaderXOllaQueueWaitMs     = "X-Olla-Queue-Wait-Ms"     // only present when the request waited in the queue
 )

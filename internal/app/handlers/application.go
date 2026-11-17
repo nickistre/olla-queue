@@ -147,6 +147,8 @@ type Application struct {
 	// stickyStatsFn is non-nil when sticky sessions are enabled. Stored as a
 	// closure so the handler layer does not need to import the balancer package.
 	stickyStatsFn func() *balancer.StickyStats
+	// queueStatsFn mirrors stickyStatsFn for the request queue.
+	queueStatsFn  func() *balancer.QueueStats
 	aliasResolver *registry.AliasResolver
 	rejectLog     *rejectLogs
 	// throttles holds every rejection-log throttle the application created, so shutdown
@@ -305,6 +307,11 @@ func (a *Application) GetProfileLookup() translator.ProfileLookup {
 // Called by HTTPService when sticky sessions are enabled.
 func (a *Application) SetStickyStatsFn(fn func() *balancer.StickyStats) {
 	a.stickyStatsFn = fn
+}
+
+// SetQueueStatsFn wires in the request queue stats provider after construction.
+func (a *Application) SetQueueStatsFn(fn func() *balancer.QueueStats) {
+	a.queueStatsFn = fn
 }
 
 // SetSecurityAdapters wires the real security.Adapters into the handlers-layer

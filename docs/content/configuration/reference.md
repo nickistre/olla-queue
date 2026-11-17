@@ -314,6 +314,42 @@ proxy:
     prefix_hash_bytes: 512
 ```
 
+### Request Queue {#request-queue}
+
+Caps in-flight requests per endpoint and holds the overflow in a FIFO queue until a slot frees. See [Request Queue](../concepts/request-queue.md) for how slots are resolved and dispatched.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `queue.enabled` | bool | `false` | Enable the request queue (opt-in) |
+| `queue.max_size` | int | `100` | Most requests that may wait at once; more are rejected with 503 + `Retry-After` |
+| `queue.timeout` | duration | `60s` | Longest a request waits for a slot before a 503 + `Retry-After` |
+| `queue.default_slots` | int | `1` | Slots for an endpoint with no `max_concurrent` and no discovered count |
+| `queue.discover_slots` | bool | `true` | Read slot counts from llama.cpp `/props` and llama-swap's running models |
+| `queue.slot_refresh_interval` | duration | `30s` | How often discovered slot counts are refreshed |
+
+**Environment Variables**: `OLLA_PROXY_QUEUE_ENABLED`, `OLLA_PROXY_QUEUE_MAX_SIZE`, `OLLA_PROXY_QUEUE_TIMEOUT`
+
+Example:
+
+```yaml
+proxy:
+  queue:
+    enabled: true
+    max_size: 100
+    timeout: 60s
+    default_slots: 1
+discovery:
+  static:
+    endpoints:
+      - name: gpu-box
+        url: http://192.168.0.10:8080
+        type: llamacpp          # slots discovered from /props total_slots
+      - name: ollama-box
+        url: http://192.168.0.11:11434
+        type: ollama
+        max_concurrent: 4       # matches OLLAMA_NUM_PARALLEL
+```
+
 ## Discovery Configuration
 
 Endpoint discovery and health checking.
@@ -349,6 +385,7 @@ discovery:
 | `static.endpoints[].model_filter` | object | No | Model filtering for this endpoint |
 | `static.endpoints[].auth` | object | No | Outbound authentication credentials (see below) |
 | `static.endpoints[].headers` | map[string]string | No | Custom outbound headers applied on every forwarded request |
+| `static.endpoints[].max_concurrent` | int | No | Request queue slot limit for this endpoint; `0` (default) = discover or use `proxy.queue.default_slots`. Only used when `proxy.queue.enabled` is true |
 
 #### Endpoint Authentication (`auth:`)
 
@@ -901,6 +938,9 @@ These control startup behaviour and are read before the YAML config is loaded.
 | `OLLA_PROXY_RETRY_MAX_ATTEMPTS` | `proxy.retry.max_attempts` | Integer. `0` tries every eligible endpoint once. |
 | `OLLA_PROXY_RETRY_NON_IDEMPOTENT` | `proxy.retry.non_idempotent` | `true` (default) or `false`. |
 | `OLLA_PROXY_STICKY_SESSIONS_ENABLED` | `proxy.sticky_sessions.enabled` | Only the master switch is exposed. Other sticky-session fields are YAML-only. |
+| `OLLA_PROXY_QUEUE_ENABLED` | `proxy.queue.enabled` | `true` or `false` (default). |
+| `OLLA_PROXY_QUEUE_MAX_SIZE` | `proxy.queue.max_size` | Integer, must be > 0 when the queue is enabled. |
+| `OLLA_PROXY_QUEUE_TIMEOUT` | `proxy.queue.timeout` | Go duration string. |
 
 ### Logging and Diagnostics
 

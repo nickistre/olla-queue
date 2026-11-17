@@ -22,6 +22,9 @@ const (
 	ContextStickyKeySourceKey = contextKey("sticky-key-source") // which source produced the key
 	ContextStickyOutcomeKey   = contextKey("sticky-outcome")    // *StickyOutcome written by the wrapper
 
+	// ContextQueueOutcomeKey carries a *domain.QueueOutcome the queue wrapper fills in.
+	ContextQueueOutcomeKey = contextKey("queue-outcome")
+
 	// ContextModelAliasMapKey stores a map[string]string of endpoint URL → actual model name
 	// when a model alias is resolved, allowing the proxy to rewrite the model name in the
 	// request body to match what the selected backend expects

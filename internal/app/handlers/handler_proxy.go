@@ -693,7 +693,8 @@ func (a *Application) handleProxyError(w *core.ResponseStartedWriter, err error)
 		return
 	}
 
-	http.Error(w, fmt.Sprintf("Proxy error: %v", err), http.StatusBadGateway)
+	status := writeProxyErrorHeaders(w, err)
+	http.Error(w, fmt.Sprintf("Proxy error: %v", err), status)
 }
 
 // logNoCompatibleFallback records the widen-to-all fallback; translator routes expect it for a

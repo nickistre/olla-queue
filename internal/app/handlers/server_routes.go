@@ -50,6 +50,7 @@ func (a *Application) registerRoutes() {
 	a.routeRegistry.RegisterWithMethod("/internal/stats/models", a.modelStatsHandler, "Model statistics", "GET")
 	a.routeRegistry.RegisterWithMethod("/internal/stats/translators", a.translatorStatsHandler, "Translator statistics", "GET")
 	a.routeRegistry.RegisterWithMethod("/internal/stats/sticky", a.stickyStatsHandler, "Sticky session statistics", "GET")
+	a.routeRegistry.RegisterWithMethod("/internal/stats/queue", a.queueStatsHandler, "Request queue statistics", "GET")
 	a.routeRegistry.RegisterWithMethod("/internal/process", a.processStatsHandler, "Process status", "GET")
 	a.routeRegistry.RegisterWithMethod("/version", a.versionHandler, "Olla version information", "GET")
 

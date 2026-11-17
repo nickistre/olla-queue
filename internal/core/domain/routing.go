@@ -1,6 +1,10 @@
 package domain
 
-import "github.com/puzpuzpuz/xsync/v4"
+import (
+	"time"
+
+	"github.com/puzpuzpuz/xsync/v4"
+)
 
 const (
 	InspectionMetaPathSupport = "path_support"
@@ -104,6 +108,15 @@ func (rp *RequestProfile) AddSupportedProfile(profileType string) {
 
 func (rp *RequestProfile) SetInspectionMeta(key string, value interface{}) {
 	rp.InspectionMeta.Store(key, value)
+}
+
+// QueueOutcome reports how long a request waited in the request queue, summed
+// across retry attempts. Like
+// StickyOutcome, the handler allocates it into the context, the queue wrapper
+// fills it during Select, and the proxy engine surfaces it as a response header.
+type QueueOutcome struct {
+	Wait   time.Duration
+	Queued bool
 }
 
 // StickyOutcome carries the result of a sticky session selection back to the

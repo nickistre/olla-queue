@@ -198,7 +198,25 @@ func parsePatch(data []byte) (Behaviour, patchFields, error) {
 // statsStore tracks per-path request counts using atomic int64s inside a
 // sync.Map so hot paths never contend on a single lock.
 type statsStore struct {
-	m sync.Map // map[string]*atomic.Int64
+	m        sync.Map // map[string]*atomic.Int64
+	inFlight atomic.Int64
+	peak     atomic.Int64
+}
+
+// enter and leave track concurrent inference requests and the high-water mark,
+// so a test can assert that a proxy in front never exceeded a concurrency cap.
+func (s *statsStore) enter() {
+	n := s.inFlight.Add(1)
+	for {
+		p := s.peak.Load()
+		if n <= p || s.peak.CompareAndSwap(p, n) {
+			return
+		}
+	}
+}
+
+func (s *statsStore) leave() {
+	s.inFlight.Add(-1)
 }
 
 func (s *statsStore) inc(path string) {
@@ -229,6 +247,8 @@ func (s *statsStore) snapshot() (int64, map[string]int64) {
 }
 
 func (s *statsStore) reset() {
+	// inFlight is left alone: requests still running will decrement it.
+	s.peak.Store(s.inFlight.Load())
 	s.m.Range(func(_, v any) bool {
 		if counter, ok := v.(*atomic.Int64); ok {
 			counter.Store(0)
@@ -277,7 +297,9 @@ func (srv *mockServer) handleReset(w http.ResponseWriter, _ *http.Request) {
 func (srv *mockServer) handleStats(w http.ResponseWriter, _ *http.Request) {
 	total, byPath := srv.stats.snapshot()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"total":   total,
-		"by_path": byPath,
+		"total":          total,
+		"by_path":        byPath,
+		"in_flight":      srv.stats.inFlight.Load(),
+		"peak_in_flight": srv.stats.peak.Load(),
 	})
 }

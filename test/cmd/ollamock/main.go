@@ -39,6 +39,7 @@ func main() {
 	tagsCapabilities := flag.Bool("tags-capabilities", false, "emit per-model capabilities in /api/tags, as Ollama 0.30+ does; off by default so the main fleet's listing is unchanged")
 	loaded := flag.String("loaded", "", "comma-separated models /api/ps reports as resident (empty = none)")
 	teiKind := flag.String("tei-kind", teiKindEmbedding, "kind of model a TEI instance reports in /info and serves: embedding, reranker or classifier")
+	totalSlots := flag.Int("total-slots", 0, "serve llama.cpp-style GET /props reporting this total_slots (0 = no /props)")
 	flag.Parse()
 
 	if !slices.Contains([]string{teiKindEmbedding, teiKindReranker, teiKindClassifier}, *teiKind) {
@@ -57,6 +58,7 @@ func main() {
 		tagsCapabilities: *tagsCapabilities,
 		loaded:           parseLoaded(*loaded),
 		teiKind:          *teiKind,
+		totalSlots:       *totalSlots,
 	}
 
 	srv := newServer(cfg)

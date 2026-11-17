@@ -34,6 +34,7 @@ go run ./test/cmd/ollamock \
 | `--stream-chunks` | `5` | Number of content chunks per streamed response |
 | `--tei-kind` | `embedding` | Kind a TEI instance reports in `GET /info` `model_type` and serves: `embedding`, `reranker` or `classifier`. Routes for another kind answer 424 |
 | `--loaded` | (none) | Comma-separated models `GET /api/ps` reports as resident; empty reports none. Lets a fleet of instances hold different loaded sets |
+| `--total-slots` | `0` | Serve llama.cpp-style `GET /props` reporting this `total_slots`, for Olla's request queue slot discovery. `0` leaves `/props` unserved. `/props` ignores injected behaviour |
 | `--tags-capabilities` | `false` | Emit per-model `capabilities` in `GET /api/tags`, as newer Ollama releases do: `["embedding"]` for names that look like embedders, otherwise `["completion"]` plus `"vision"` for names such as `qwen3-vl` or `llava` and `"tools"` for names such as `llama3.2` or `qwen3`. Off omits the field, which is what an older Ollama sends |
 
 ## Protocol Endpoints
@@ -45,6 +46,7 @@ go run ./test/cmd/ollamock \
 | `GET /api/tags` | Ollama model listing (`capabilities` with `--tags-capabilities`) |
 | `GET /api/ps` | Ollama loaded models (from `--loaded`) |
 | `GET /api/version` | Ollama version |
+| `GET /props` | llama.cpp server properties (`total_slots`), only with `--total-slots` |
 | `POST /api/chat` | Ollama chat (streaming default) |
 | `POST /api/generate` | Ollama generate (streaming default) |
 | `POST /api/embed` | Ollama native embeddings (`input` string or array). Empty or absent input is a 200 with empty `embeddings`; a named model the instance does not serve is a 404; a body with no model is served |
@@ -163,8 +165,10 @@ curl -X POST http://127.0.0.1:19431/_mock/reset
 
 ```bash
 curl http://127.0.0.1:19431/_mock/stats
-# {"total":42,"by_path":{"/v1/chat/completions":30,"/api/tags":12}}
+# {"total":42,"by_path":{"/v1/chat/completions":30,"/api/tags":12},"in_flight":0,"peak_in_flight":2}
 ```
+
+`in_flight` and `peak_in_flight` count concurrent POST (inference) requests, so a test can check that a proxy in front of the mock never exceeded a concurrency cap. `POST /_mock/reset` resets the peak to the current in-flight count.
 
 ## Example Requests
 

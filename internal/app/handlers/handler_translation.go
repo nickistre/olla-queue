@@ -95,7 +95,8 @@ func (a *Application) executePassthroughRequest(
 	if err != nil {
 		// only write error if response hasn't started
 		if w.Header().Get(constants.HeaderContentType) == "" {
-			a.writeTranslatorError(tracker, trans, pr, fmt.Errorf("proxy error: %w", err), http.StatusBadGateway)
+			status := writeProxyErrorHeaders(tracker, err)
+			a.writeTranslatorError(tracker, trans, pr, fmt.Errorf("proxy error: %w", err), status)
 		}
 	}
 	pr.upstreamStatus = tracker.Status()
@@ -278,7 +279,8 @@ func (a *Application) executeTranslationRequest(
 	if proxyErr != nil {
 		// only write error if response hasn't started
 		if w.Header().Get(constants.HeaderContentType) == "" {
-			a.writeTranslatorError(w, trans, pr, fmt.Errorf("proxy error: %w", proxyErr), http.StatusBadGateway)
+			status := writeProxyErrorHeaders(w, proxyErr)
+			a.writeTranslatorError(w, trans, pr, fmt.Errorf("proxy error: %w", proxyErr), status)
 		}
 	}
 	pr.upstreamStatus = tracker.Status()
@@ -682,6 +684,13 @@ func (a *Application) prepareProxyContext(ctx context.Context, r *http.Request, 
 		r = r.WithContext(ctx)
 	}
 
+	// The queue wrapper fills this in during Select; the engine turns it into
+	// X-Olla-Queue-Wait-Ms.
+	if a.Config != nil && a.Config.Proxy.Queue.Enabled {
+		ctx = context.WithValue(ctx, constants.ContextQueueOutcomeKey, &domain.QueueOutcome{})
+		r = r.WithContext(ctx)
+	}
+
 	// endpoints that serve the request at different paths each get their own
 	if len(pr.endpointPaths) > 0 {
 		ctx = context.WithValue(ctx, constants.ContextEndpointPathMapKey, pr.endpointPaths)
@@ -924,9 +933,17 @@ func (a *Application) startProxyGoroutine(
 	go func() {
 		localCtx, localR := a.prepareProxyContext(ctx, r, pr)
 		err := a.proxyService.ProxyRequestToEndpoints(localCtx, streamRecorder, localR, endpoints, pr.stats, pr.requestLogger)
-		// If the proxy returned an error without ever calling Write or WriteHeader,
-		// headersReady is never closed and the main goroutine blocks forever.
-		// Ensure it is always signalled before closing the pipe.
+		// If the proxy returned an error without ever calling Write or WriteHeader
+		// (selection failed, the queue rejected it, every endpoint was unreachable),
+		// the recorder still holds its default 200 and the handler would open an
+		// empty SSE stream. Mark it failed so the error path answers instead.
+		if err != nil && streamRecorder.failBeforeHeaders(proxyErrorStatus(err)) {
+			_ = json.NewEncoder(pipeWriter).Encode(map[string]any{
+				"error": map[string]any{"message": "proxy error: " + err.Error()},
+			})
+		}
+		// headersReady must always be signalled before closing the pipe, or the
+		// main goroutine blocks forever.
 		streamRecorder.ensureHeadersReady()
 		pipeWriter.Close() // Signal end of stream
 		proxyErrChan <- err
@@ -1242,6 +1259,8 @@ func (a *Application) copyOllaHeaders(from headerGetter, to http.ResponseWriter)
 		constants.HeaderXOllaRoutingStrategy,
 		constants.HeaderXOllaRoutingDecision,
 		constants.HeaderXOllaRoutingReason,
+		constants.HeaderXOllaQueueWaitMs,
+		"Retry-After",
 	}
 
 	for _, header := range ollaHeaders {
@@ -1449,6 +1468,24 @@ func (r *streamingResponseRecorder) Header() http.Header {
 // multiple goroutines and is idempotent - subsequent calls are no-ops.
 func (r *streamingResponseRecorder) ensureHeadersReady() {
 	r.closeOnce.Do(func() { close(r.headersReady) })
+}
+
+// failBeforeHeaders records status (and Retry-After, if any) as the response if
+// nothing has been written yet, releasing headersReady. It reports whether it
+// did, so the caller knows the handler will read an error body from the pipe.
+// Everything is set inside the once so the handler goroutine, which reads only
+// after headersReady closes, never races these writes.
+func (r *streamingResponseRecorder) failBeforeHeaders(status int, retryAfter string) bool {
+	failed := false
+	r.closeOnce.Do(func() {
+		r.status = status
+		if retryAfter != "" {
+			r.headers.Set("Retry-After", retryAfter)
+		}
+		failed = true
+		close(r.headersReady)
+	})
+	return failed
 }
 
 func (r *streamingResponseRecorder) Write(data []byte) (int, error) {

@@ -29,6 +29,7 @@ Internal endpoints for health monitoring, system status, and statistics.
 - `/internal/stats/models` - Model usage statistics
 - `/internal/stats/translators` - Translator usage and performance statistics
 - `/internal/stats/sticky` - Sticky session statistics
+- `/internal/stats/queue` - Request queue statistics
 - `/internal/process` - Process information
 - `/version` - Olla version information
 

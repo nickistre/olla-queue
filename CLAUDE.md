@@ -60,7 +60,7 @@ Hexagonal architecture - domain (`internal/core`) → infrastructure (`internal/
 - `test/scripts/logic/test-model-routing.sh` - routing & header tests
 
 ## API Endpoints
-**Internal** (`/internal/...`): `health`, `status`, `status/endpoints`, `status/models`, `stats/models`, `stats/translators`, `stats/sticky` (`{"enabled":false}` when off), `process`. Plus `/version`.
+**Internal** (`/internal/...`): `health`, `status`, `status/endpoints`, `status/models`, `stats/models`, `stats/translators`, `stats/sticky` (`{"enabled":false}` when off), `stats/queue` (same), `process`. Plus `/version`.
 
 **Unified models**: `/olla/models` (listing with filtering), `/olla/models/{id}` (by ID or alias).
 
@@ -71,12 +71,13 @@ Hexagonal architecture - domain (`internal/core`) → infrastructure (`internal/
 **Translator** (dynamically registered): `/olla/anthropic/v1/messages` (POST, passthrough + translation), `/olla/anthropic/v1/models` (GET), `/olla/anthropic/v1/messages/count_tokens` (POST).
 
 ## Response Headers
-`X-Olla-Endpoint` (backend name), `X-Olla-Model`, `X-Olla-Backend-Type` (ollama, lm-studio, litellm, vllm, vllm-mlx, sglang, llamacpp, lmdeploy, lemonade, openai, openai-compatible, docker-model-runner, omlx, text-embeddings-inference), `X-Olla-Request-ID`, `X-Olla-Response-Time`, `X-Olla-Mode` (`passthrough` or absent for translation), `X-Olla-Routing-{Strategy,Decision,Reason}`, `X-Olla-Sticky-Session` (hit/miss/repin/disabled), `X-Olla-Sticky-Key-Source`, `X-Olla-Session-ID`.
+`X-Olla-Endpoint` (backend name), `X-Olla-Model`, `X-Olla-Backend-Type` (ollama, lm-studio, litellm, vllm, vllm-mlx, sglang, llamacpp, lmdeploy, lemonade, openai, openai-compatible, docker-model-runner, omlx, text-embeddings-inference), `X-Olla-Request-ID`, `X-Olla-Response-Time`, `X-Olla-Mode` (`passthrough` or absent for translation), `X-Olla-Routing-{Strategy,Decision,Reason}`, `X-Olla-Sticky-Session` (hit/miss/repin/disabled), `X-Olla-Sticky-Key-Source`, `X-Olla-Session-ID`, `X-Olla-Queue-Wait-Ms` (only when the request waited in the queue).
 
 ## Architecture Notes
 - **Translator layer** - API format translation (e.g. OpenAI ↔ Anthropic) with passthrough optimisation. **Passthrough mode**: when a backend natively supports the Anthropic Messages API (vLLM, vLLM-MLX, SGLang, LMDeploy, llama.cpp, LM Studio, Ollama, oMLX, Docker Model Runner), requests bypass translation entirely.
 - **Translator metrics** - thread-safe per-translator stats (passthrough/translation rates, fallback reasons, latency, streaming breakdown) in `stats/translator_collector.go`.
 - **Sticky sessions** - optional decorator on the endpoint selector that pins multi-turn conversations to the backend that handled the first turn, maximising KV-cache reuse. 64-bit FNV-1a hashed keys, TTL + LRU bounded, purged on routable→non-routable health transitions (`balancer/sticky.go`).
+- **Request queue** - optional outermost decorator (`balancer/queue.go`), wrapping sticky and the strategy. Reserves a slot inside `Select` and releases it in `DecrementConnections` (paired 1:1 per attempt in `proxy/core/retry.go`); overflow waits FIFO with skip-ahead, no dispatcher goroutine. Slots: endpoint `max_concurrent` > discovered (`balancer/queue_capacity.go`: llama.cpp `/props` `total_slots`, llama-swap `/running` + `/props?autoload=false`) > `queue.default_slots`. Full/timed-out queue gives 503 + `Retry-After`.
 - **Capability routing** - only model-less requests are narrowed by capability (vision, tools, embeddings, TEI `rerank`/`classification` from the path); a request naming a model skips it. The capabilities must all sit on one model. TEI kinds (embedding, reranker, classifier) come from `/info` `model_type` and are never `text-generation`.
 - **Load balancing** - priority-based recommended for production.
 - **Version management** - build-time injection via `internal/version`.

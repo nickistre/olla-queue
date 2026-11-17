@@ -45,6 +45,9 @@ type serverConfig struct {
 	ttftMS       int
 	tps          int
 	streamChunks int
+	// totalSlots, when > 0, serves llama.cpp-style GET /props with this
+	// total_slots so Olla's request queue can discover it.
+	totalSlots int
 	// tagsCapabilities makes /api/tags carry per-model capabilities, as Ollama 0.30+
 	// does. Off (the default) keeps the pre-existing listing for the main fleet.
 	tagsCapabilities bool
@@ -78,6 +81,12 @@ func (srv *mockServer) handler() http.Handler {
 	srv.controlHandlers(mux)
 
 	// LLM protocol routes.
+	// /props skips behaviour on purpose: it models llama.cpp's metadata
+	// endpoint, and slot discovery should not be slowed or failed by a fault
+	// injected for inference traffic.
+	if srv.cfg.totalSlots > 0 {
+		mux.HandleFunc("GET /props", srv.handleProps)
+	}
 	mux.HandleFunc("GET /health", srv.wrap(srv.handleHealth))
 	mux.HandleFunc("GET /", srv.wrap(srv.handleRoot))
 
@@ -122,6 +131,12 @@ func (srv *mockServer) handler() http.Handler {
 func (srv *mockServer) wrap(inner http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		srv.stats.inc(r.URL.Path)
+		if r.Method == http.MethodPost {
+			// Inference routes are all POST; tracking only those keeps health
+			// probes out of the concurrency figures the queue tests read.
+			srv.stats.enter()
+			defer srv.stats.leave()
+		}
 		w.Header().Set("X-Ollamock-Instance", srv.cfg.name)
 		if !srv.applyBehaviour(w, r) {
 			return
@@ -1339,4 +1354,17 @@ func (srv *mockServer) handleTEIMetrics(w http.ResponseWriter, _ *http.Request) 
 // ctx.Done() channel. Used in select statements that must compile on Go 1.24.
 func contextDone(ctx context.Context) <-chan struct{} {
 	return ctx.Done()
+}
+
+// handleProps mimics llama.cpp's GET /props closely enough for slot discovery.
+func (srv *mockServer) handleProps(w http.ResponseWriter, _ *http.Request) {
+	model := ""
+	if len(srv.cfg.models) > 0 {
+		model = srv.cfg.models[0]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_slots": srv.cfg.totalSlots,
+		"model_path":  model,
+		"is_sleeping": false,
+	})
 }
