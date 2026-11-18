@@ -252,3 +252,54 @@ func TestQueue_StickyHoldWithRealStickyWrapper(t *testing.T) {
 		t.Fatalf("sticky outcome = %q, want hit", outcome.Result)
 	}
 }
+
+// twoGroupNode is taki with an embeddings group beside the GPU group, and a
+// discovered endpoint total of 1: only qwen3.6 is loaded.
+func twoGroupNode() (modelSlots, *domain.Endpoint) {
+	node := makeEndpoint("taki", "http://taki:8080")
+	node.SlotGroups = []domain.SlotGroup{
+		{Name: "emb", Models: []string{"nomic*"}},
+		{Name: "gpu", Models: []string{"qwen*"}},
+	}
+	return modelSlots{
+		endpoint: 1,
+		models:   map[string]int{"qwen3.6": 1},
+		groups:   map[string]int{"gpu": 1, "emb": 1},
+	}, node
+}
+
+func TestQueue_DiscoveredEndpointTotalDoesNotCapOtherGroups(t *testing.T) {
+	res, node := twoGroupNode()
+	q := NewQueueWrapper(NewRoundRobinSelector(NewTestStatsCollector()), defaultQueueConfig(), res)
+	t.Cleanup(q.Stop)
+	eps := []*domain.Endpoint{node}
+
+	if _, err := q.Select(modelCtx("qwen3.6"), eps); err != nil {
+		t.Fatal(err)
+	}
+	// The GPU group is full, which fills the discovered total too, but the
+	// embeddings group has its own slot.
+	emb := selectAsync(modelCtx("nomic-embed"), q, eps)
+	if r := mustReceive(t, emb); r.err != nil {
+		t.Fatalf("embeddings request should not wait: %+v", r)
+	}
+}
+
+func TestQueue_ConfiguredEndpointLimitCapsEveryGroup(t *testing.T) {
+	res, node := twoGroupNode()
+	node.MaxConcurrent = 1
+	q := NewQueueWrapper(NewRoundRobinSelector(NewTestStatsCollector()), defaultQueueConfig(), res)
+	t.Cleanup(q.Stop)
+	eps := []*domain.Endpoint{node}
+
+	running, err := q.Select(modelCtx("qwen3.6"), eps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emb := selectAsync(modelCtx("nomic-embed"), q, eps)
+	waitForDepth(t, q, 1)
+	q.DecrementConnections(running)
+	if r := mustReceive(t, emb); r.err != nil {
+		t.Fatalf("embeddings request after the slot freed: %+v", r)
+	}
+}

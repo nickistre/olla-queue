@@ -103,8 +103,9 @@ export function slotStatusRank(s: SlotStatus): number {
 const full = (taken: number, slots: number) => slots > 0 && taken >= slots;
 
 /** Status of one line. The endpoint's health wins over slot use: an offline
- *  endpoint's free slots are no use. A group line is also busy when the
- *  endpoint-wide limit is full, since that caps every group on it. */
+ *  endpoint's free slots are no use. A group line is also busy when a
+ *  configured endpoint-wide limit is full, since that caps every group on it;
+ *  a discovered or default one doesn't cap groups. */
 export function slotStatus(
   e: QueueEndpointStats,
   line: Pick<SlotLine, 'label' | 'slots' | 'in_use' | 'external'>,
@@ -119,7 +120,7 @@ export function slotStatus(
   if (full(line.in_use + line.external, line.slots)) {
     return { status: 'Busy', reason: 'Every slot is taken; new requests wait' };
   }
-  if (line.label !== '' && full(e.in_use + e.external, e.slots)) {
+  if (line.label !== '' && line.label !== 'ungrouped' && e.slot_source === 'config' && full(e.in_use + e.external, e.slots)) {
     return { status: 'Busy', reason: `The endpoint-wide limit of ${e.slots} is reached; new requests wait` };
   }
   if (e.health === 'warming') return { status: 'Warming', reason: 'The backend is starting up' };

@@ -129,14 +129,15 @@
     'Config error': 'red',
   };
 
-  // With groups the endpoint-wide total has no line of its own; it still caps
-  // every group, so it goes in the name's tooltip.
+  // With groups the endpoint-wide total has no line of its own, so it goes in
+  // the name's tooltip. It caps the groups only when max_concurrent sets it.
   function endpointTitle(r: SlotRow): string {
     const e = r.endpoint;
     if (!r.label) return e.url;
     const what = r.label === 'ungrouped' ? 'Models outside every slot group, limited only by the endpoint' : `Slot group ${r.label}`;
     const ext = e.external > 0 ? ` +${e.external} other clients` : '';
-    return `${what}\n${e.url}: ${e.in_use}${ext} of ${e.slots} slots in use endpoint-wide (${e.slot_source})`;
+    const caps = r.label === 'ungrouped' || e.slot_source === 'config' ? '' : ', not a limit on slot groups';
+    return `${what}\n${e.url}: ${e.in_use}${ext} of ${e.slots} slots in use endpoint-wide (${e.slot_source}${caps})`;
   }
 
   function modelTitle(m: QueueModelStats): string {

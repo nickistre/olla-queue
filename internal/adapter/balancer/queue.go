@@ -892,24 +892,35 @@ func decrementOrDelete(m map[string]int, k string) {
 }
 
 // freeLocked filters to endpoints that have room for this request: under the
-// endpoint-wide limit and, where the backend reported one, under the limit of
-// the model the request will run.
+// endpoint-wide limit, under its slot group's limit and, where the backend
+// reported one, under the limit of the model the request will run.
+//
+// A grouped model skips the endpoint-wide limit unless max_concurrent sets it.
+// The discovered total only sums loaded models (and falls back to
+// default_slots), so it would let a busy group block an idle one alongside it.
 func (q *QueueWrapper) freeLocked(ctx context.Context, endpoints []*domain.Endpoint) []*domain.Endpoint {
 	var free []*domain.Endpoint
 	for _, ep := range endpoints {
 		if !q.upLocked(ep) {
 			continue
 		}
-		slots, _ := q.resolver.Slots(ep)
-		if q.inUse[ep.URLString]+q.external[ep.URLString] >= slots {
-			continue
+		model := q.modelOf(ctx, ep)
+		g := ""
+		if model != "" {
+			g = slotGroupOf(ep, model)
 		}
-		if model := q.modelOf(ctx, ep); model != "" {
+		if g == "" || ep.MaxConcurrent > 0 {
+			slots, _ := q.resolver.Slots(ep)
+			if q.inUse[ep.URLString]+q.external[ep.URLString] >= slots {
+				continue
+			}
+		}
+		if model != "" {
 			k := modelKey(ep.URLString, model)
 			if limit, known := q.resolver.ModelSlots(ep, model); known && q.modelInUse[k]+q.modelExternal[k] >= limit {
 				continue
 			}
-			if g := slotGroupOf(ep, model); g != "" {
+			if g != "" {
 				gk := modelKey(ep.URLString, g)
 				if limit, _ := q.resolver.GroupSlots(ep, g); q.groupInUse[gk]+q.groupExternal[gk] >= limit {
 					continue

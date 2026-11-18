@@ -83,7 +83,7 @@ discovery:
 
 - A model joins the **first** group with a matching pattern (`*` wildcard, case-insensitive). Models in no group are only bounded by the endpoint and their own model limit.
 - A group's limit is its `max_concurrent`, else the slots of its **currently loaded** models, else `default_slots`. Counting only loaded models is what makes a swap group work: with `qwen3.6` (1 slot) loaded, `taki-gpu` has 1 slot, and a `qwen3.8` request waits until `qwen3.6` is idle. Then llama-swap swaps, as intended.
-- A request needs room in its endpoint, its group and its model. Traffic from other clients counts against the group too.
+- A request needs room in its group and its model. The endpoint-wide limit also applies only when `max_concurrent` sets it: a discovered total counts only loaded models, so it would let a busy group block an idle one beside it. Traffic from other clients counts against the group too.
 
 The model name is the one the backend serves. If an [alias](model-aliases.md) maps to different names on different endpoints, each endpoint's limit is looked up under its own name.
 
@@ -185,7 +185,7 @@ While the queue is on, the dashboard at `/internal/ui/` shows it in three places
 - **Overview tiles:** "Queued requests" (depth against `max_size`) and "Mean queue wait". The mean covers the chart's window (about 15 minutes), so it reflects current conditions and clears once the queue drains.
 - **Queue tab:** the waiting requests and each endpoint's slot usage, including where its limit came from and each model's use against its own limit. An endpoint with slot groups gets one row per group, labelled `endpoint (group)`, plus an `endpoint (ungrouped)` row for models outside every group. Each row has a status:
   - **Available**: a slot is free.
-  - **Busy**: every slot is taken, or, for a group, the endpoint-wide limit is reached. New requests wait.
+  - **Busy**: every slot is taken, or, for a group, the endpoint's `max_concurrent` is reached. New requests wait.
   - **Cold**: no model in the group is loaded, so the next request loads one, perhaps by swapping another out.
   - **Warming**: the backend is starting up.
   - **Offline**: failing health checks, or a connection to it failed and no health check has passed since.
