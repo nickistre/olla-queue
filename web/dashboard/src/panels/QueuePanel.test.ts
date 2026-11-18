@@ -65,10 +65,11 @@ const busy = {
       url: 'http://gpu:8080',
       slot_source: 'discovered',
       slots: 5,
-      in_use: 3,
+      in_use: 2,
+      external: 1,
       models: [
-        { model: 'qwen3:8b', slots: 2, in_use: 2 },
-        { model: 'llama3.1:8b', slots: 3, in_use: 1 },
+        { model: 'qwen3:8b', slots: 2, in_use: 1, external: 1 },
+        { model: 'llama3.1:8b', slots: 3, in_use: 1, external: 0 },
       ],
     },
   ],
@@ -108,9 +109,21 @@ describe('QueuePanel per-model slots', () => {
     await renderWith(busy, () => expect(queue.data?.endpoints?.[0]?.models?.length).toBe(2));
     const pills = [...document.querySelectorAll('.model-slot')];
     const text = pills.map((p) => p.textContent?.replace(/\s+/g, ' ').trim());
-    expect(text).toContain('qwen3:8b 2/2');
+    // One of qwen's two slots is ours and one is another client's: full.
+    expect(text).toContain('qwen3:8b 1+1/2');
     expect(text).toContain('llama3.1:8b 1/3');
     expect(pills.find((p) => p.textContent?.includes('qwen3:8b'))?.classList.contains('is-full')).toBe(true);
     expect(pills.find((p) => p.textContent?.includes('llama3.1:8b'))?.classList.contains('is-full')).toBe(false);
+  });
+});
+
+describe('QueuePanel outside traffic', () => {
+  it('marks slots held by other clients on the endpoint row', async () => {
+    await renderWith(busy, () => expect(queue.data?.endpoints?.[0]?.external).toBe(1));
+    const cell = document.querySelector('.external[title]');
+    expect(cell?.textContent).toBe('+1');
+    expect(cell?.getAttribute('title')).toContain('did not come through this Olla');
+    const qwen = [...document.querySelectorAll('.model-slot')].find((p) => p.textContent?.includes('qwen3:8b'));
+    expect(qwen?.getAttribute('title')).toContain('1 by other clients');
   });
 });

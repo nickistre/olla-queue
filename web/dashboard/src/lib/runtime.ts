@@ -183,9 +183,17 @@ export const parseQueue = guarded((raw: unknown): QueueStatsResponse | null => {
     slot_source: str(e.slot_source),
     slots: num(e.slots),
     in_use: num(e.in_use),
+    external: num(e.external),
     models: arr(e.models)
       .filter(isObj)
-      .map((m): QueueModelStats => ({ model: str(m.model), slots: num(m.slots), in_use: num(m.in_use) })),
+      .map(
+        (m): QueueModelStats => ({
+          model: str(m.model),
+          slots: num(m.slots),
+          in_use: num(m.in_use),
+          external: num(m.external),
+        }),
+      ),
   }));
   const waiting: QueueWaiter[] = arr(raw.waiting).filter(isObj).map((w) => ({
     enqueued_at: str(w.enqueued_at),

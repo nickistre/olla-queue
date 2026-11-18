@@ -39,6 +39,7 @@ type ProxyServiceWrapper struct {
 	// queueWrapper and slotDiscoverer are non-nil when proxy.queue is enabled.
 	queueWrapper     *balancer.QueueWrapper
 	slotDiscoverer   *balancer.SlotDiscoverer
+	busyTracker      *balancer.BusyTracker
 	endpointRepo     domain.EndpointRepository
 	discoveryService ports.DiscoveryService
 	statsCollector   ports.StatsCollector
@@ -175,6 +176,9 @@ func (s *ProxyServiceWrapper) Stop(ctx context.Context) error {
 
 	if s.stickyWrapper != nil {
 		s.stickyWrapper.Stop()
+	}
+	if s.busyTracker != nil {
+		s.busyTracker.Stop()
 	}
 	if s.slotDiscoverer != nil {
 		s.slotDiscoverer.Stop()
@@ -375,13 +379,20 @@ func (s *ProxyServiceWrapper) applyQueue() {
 	if s.slotDiscoverer != nil {
 		s.slotDiscoverer.SetOnChange(qw.Wake)
 		s.slotDiscoverer.Start()
+		// Busy tracking reads the backends discovery identified, so it only
+		// exists alongside discovery.
+		if cfg.TrackExternalLoad {
+			s.busyTracker = balancer.NewBusyTracker(s.slotDiscoverer, qw.ObserveBusy, cfg.BusyPollInterval)
+			s.busyTracker.Start()
+		}
 	}
 
 	s.logger.Info("Request queue enabled",
 		"max_size", cfg.MaxSize,
 		"timeout", cfg.Timeout,
 		"default_slots", cfg.DefaultSlots,
-		"discover_slots", cfg.DiscoverSlots)
+		"discover_slots", cfg.DiscoverSlots,
+		"track_external_load", s.busyTracker != nil)
 
 	if s.discoverySvc != nil {
 		s.discoverySvc.SetPurgeDeadEndpointsFn(s.PurgeDeadEndpoints)

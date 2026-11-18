@@ -105,6 +105,10 @@ type QueueWrapper struct {
 	modelOf    func(ctx context.Context, ep *domain.Endpoint) string
 	inUse      map[string]int
 	modelInUse map[string]int
+	// external holds slots the backend reports busy beyond this Olla's own
+	// requests, per endpoint and per endpoint+model (see ObserveBusy).
+	external      map[string]int
+	modelExternal map[string]int
 	// reservations is keyed by the endpoint copy Select hands out, which is
 	// unique per request; see reserveLocked.
 	reservations map[*domain.Endpoint]reservation
@@ -141,14 +145,16 @@ func NewQueueWrapper(inner domain.EndpointSelector, cfg config.QueueConfig, reso
 		resolver = staticSlots{fallback: cfg.DefaultSlots}
 	}
 	return &QueueWrapper{
-		inner:        inner,
-		resolver:     resolver,
-		cfg:          cfg,
-		inUse:        make(map[string]int),
-		modelInUse:   make(map[string]int),
-		reservations: make(map[*domain.Endpoint]reservation),
-		known:        make(map[string]*domain.Endpoint),
-		modelOf:      requestedModel,
+		inner:         inner,
+		resolver:      resolver,
+		cfg:           cfg,
+		inUse:         make(map[string]int),
+		modelInUse:    make(map[string]int),
+		external:      make(map[string]int),
+		modelExternal: make(map[string]int),
+		reservations:  make(map[*domain.Endpoint]reservation),
+		known:         make(map[string]*domain.Endpoint),
+		modelOf:       requestedModel,
 	}
 }
 
@@ -314,6 +320,52 @@ func (q *QueueWrapper) SetPinLookup(fn func(keys []string) map[string]string) {
 	q.mu.Unlock()
 }
 
+// ObserveBusy takes a backend's own count of running requests (everyone's,
+// ours included) and keeps the part that is not ours: those slots are taken
+// as far as admission is concerned.
+//
+// Our share is read at the same moment, so the difference is what other
+// clients hold. A request of ours the backend has not registered yet makes
+// the difference too small; that is clamped at 0 and only ever under-counts,
+// which errs towards the old behaviour rather than blocking. A request of
+// ours that just finished but is still listed over-counts by one until the
+// next reading, at most one poll interval (milliseconds on llama-swap's feed).
+//
+// An invalid reading clears what was known: a dropped feed or a server
+// started with --no-slots falls back to counting only this Olla's traffic.
+func (q *QueueWrapper) ObserveBusy(ep *domain.Endpoint, b BackendBusy) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	url := ep.URLString
+	// List the endpoint in stats before any request is routed to it, so the
+	// dashboard shows a busy backend from the first reading.
+	if _, ok := q.known[url]; !ok {
+		q.known[url] = ep
+	}
+
+	prefix := modelKey(url, "")
+	for k := range q.modelExternal {
+		if strings.HasPrefix(k, prefix) {
+			delete(q.modelExternal, k)
+		}
+	}
+	if !b.Valid {
+		delete(q.external, url)
+	} else {
+		q.external[url] = max(0, b.Total-q.inUse[url])
+		for model, n := range b.Models {
+			k := modelKey(url, model)
+			if ext := n - q.modelInUse[k]; ext > 0 {
+				q.modelExternal[k] = ext
+			}
+		}
+	}
+	// Outside traffic easing off frees slots that no release of ours will
+	// signal, so every reading gets a dispatch pass (one walk of the queue).
+	q.dispatchLocked()
+}
+
 // Wake runs a dispatch pass. Call it when slot capacity grows (e.g. a refresh
 // discovered more slots) so waiters don't sit idle until the next release.
 func (q *QueueWrapper) Wake() {
@@ -446,11 +498,12 @@ func (q *QueueWrapper) freeLocked(ctx context.Context, endpoints []*domain.Endpo
 			continue
 		}
 		slots, _ := q.resolver.Slots(ep)
-		if q.inUse[ep.URLString] >= slots {
+		if q.inUse[ep.URLString]+q.external[ep.URLString] >= slots {
 			continue
 		}
 		if model := q.modelOf(ctx, ep); model != "" {
-			if limit, known := q.resolver.ModelSlots(ep, model); known && q.modelInUse[modelKey(ep.URLString, model)] >= limit {
+			k := modelKey(ep.URLString, model)
+			if limit, known := q.resolver.ModelSlots(ep, model); known && q.modelInUse[k]+q.modelExternal[k] >= limit {
 				continue
 			}
 		}
@@ -476,15 +529,22 @@ func (q *QueueWrapper) modelStatsLocked(ep *domain.Endpoint) []QueueModelStats {
 		byModel[model] = &QueueModelStats{Model: model, Slots: n}
 	}
 	prefix := modelKey(ep.URLString, "")
-	for k, n := range q.modelInUse {
-		model, ok := strings.CutPrefix(k, prefix)
+	entry := func(model string) *QueueModelStats {
+		m, ok := byModel[model]
 		if !ok {
-			continue
+			m = &QueueModelStats{Model: model}
+			byModel[model] = m
 		}
-		if m, ok := byModel[model]; ok {
-			m.InUse = n
-		} else {
-			byModel[model] = &QueueModelStats{Model: model, InUse: n}
+		return m
+	}
+	for k, n := range q.modelInUse {
+		if model, ok := strings.CutPrefix(k, prefix); ok {
+			entry(model).InUse = n
+		}
+	}
+	for k, n := range q.modelExternal {
+		if model, ok := strings.CutPrefix(k, prefix); ok {
+			entry(model).External = n
 		}
 	}
 	out := make([]QueueModelStats, 0, len(byModel))
@@ -517,6 +577,8 @@ type QueueModelStats struct {
 	Model string `json:"model"`
 	Slots int    `json:"slots"`
 	InUse int    `json:"in_use"`
+	// External is slots busy with traffic that did not come through this Olla.
+	External int `json:"external"`
 }
 
 // QueueEndpointStats is the per-endpoint slot view.
@@ -527,6 +589,8 @@ type QueueEndpointStats struct {
 	Models     []QueueModelStats `json:"models"`
 	Slots      int               `json:"slots"`
 	InUse      int               `json:"in_use"`
+	// External is slots the backend reports busy beyond this Olla's own.
+	External int `json:"external"`
 }
 
 // QueueWaiterStats describes one request waiting in the queue.
@@ -584,6 +648,7 @@ func (q *QueueWrapper) Stats() QueueStats {
 			Slots:      slots,
 			SlotSource: source,
 			InUse:      q.inUse[url],
+			External:   q.external[url],
 			Models:     q.modelStatsLocked(ep),
 		})
 	}

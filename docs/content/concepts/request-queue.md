@@ -62,6 +62,21 @@ Discovered counts refresh every `queue.slot_refresh_interval`. A failed probe ke
 
 For backends that can't be probed (Ollama, vLLM, SGLang and others), set `max_concurrent` to match the backend's own concurrency, for example `OLLAMA_NUM_PARALLEL`.
 
+## Traffic from other clients
+
+Olla counts its own requests against each limit, but a backend may also be serving clients that never pass through this Olla, such as another Olla instance or a script calling it directly. Without knowing that, Olla sees a slot as free while the backend is busy. The request then queues inside the backend, out of sight, and can run past `response_header_timeout`.
+
+With `queue.track_external_load` on (the default), Olla watches what each discovered backend reports as running. Slots busy beyond Olla's own requests count as taken:
+
+- **llama-swap**: a live subscription to `GET /api/events`. Its in-flight messages give a snapshot on connect, then one update per request start and finish, each naming the model. Olla never polls llama-swap's `/upstream/<model>/slots`, because that path loads a model that isn't running. On a node with an exclusive swap group, that would evict whatever is loaded.
+- **llama.cpp**: `GET /slots` every `queue.busy_poll_interval` (default `1s`), counting slots with `is_processing`. In router mode it calls `/slots?model=<id>&autoload=false` per loaded model.
+
+Olla takes the backend's count of running requests and subtracts its own at that moment. A request of Olla's that the backend hasn't registered yet can only make that count too low. A request that just finished can count against it until the next reading, which is milliseconds on llama-swap and at most one poll on llama.cpp. When outside traffic eases off, waiting requests are dispatched straight away.
+
+If a reading isn't available, the outside count is cleared and Olla counts only its own traffic. That covers a dropped llama-swap feed and a llama-server started with `--no-slots`. Olla never blocks on stale data.
+
+The Queue tab shows outside traffic as a blue `+N` next to Olla's own count, per endpoint and per model.
+
 ## When a request can't be served
 
 | Situation | Response |

@@ -92,6 +92,8 @@ proxy:
     default_slots: 1            # fallback when nothing better is known
     discover_slots: true        # probe llama.cpp / llama-swap for total_slots
     slot_refresh_interval: 30s
+    track_external_load: true   # count slots busy with traffic from other clients as taken
+    busy_poll_interval: 1s      # llama.cpp /slots poll; llama-swap is watched live via /api/events
 
   # Failover: when a connection to a backend fails (refused, reset, network
   # unreachable), Olla marks that endpoint unhealthy and retries the request on

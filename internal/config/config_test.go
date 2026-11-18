@@ -1667,6 +1667,15 @@ func TestQueueConfig_Validate(t *testing.T) {
 			c.Proxy.Queue.Enabled = true
 			c.Proxy.Queue.SlotRefreshInterval = 0
 		}},
+		{name: "external load tracking without poll interval", wantErr: true, modify: func(c *Config) {
+			c.Proxy.Queue.Enabled = true
+			c.Proxy.Queue.BusyPollInterval = 0
+		}},
+		{name: "poll interval unused when tracking is off", modify: func(c *Config) {
+			c.Proxy.Queue.Enabled = true
+			c.Proxy.Queue.TrackExternalLoad = false
+			c.Proxy.Queue.BusyPollInterval = 0
+		}},
 		{name: "invalid values ignored while disabled", modify: func(c *Config) { c.Proxy.Queue.MaxSize = 0 }},
 		{name: "negative max_concurrent", wantErr: true, modify: func(c *Config) {
 			c.Discovery.Static.Endpoints[0].MaxConcurrent = -1

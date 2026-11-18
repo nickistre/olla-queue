@@ -250,6 +250,8 @@ export interface QueueModelStats {
   model: string;
   slots: number;
   in_use: number;
+  // Slots busy with traffic that did not come through this Olla.
+  external: number;
 }
 
 export interface QueueEndpointStats {
@@ -258,6 +260,7 @@ export interface QueueEndpointStats {
   slot_source: string;
   slots: number;
   in_use: number;
+  external: number;
   models: QueueModelStats[];
 }
 

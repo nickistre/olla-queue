@@ -250,8 +250,15 @@ type QueueConfig struct {
 	// SlotRefreshInterval controls how often slot counts are re-read from
 	// llama.cpp /props (or llama-swap's running models).
 	SlotRefreshInterval time.Duration `yaml:"slot_refresh_interval"`
-	Enabled             bool          `yaml:"enabled"`
-	DiscoverSlots       bool          `yaml:"discover_slots"`
+	// BusyPollInterval is how often llama.cpp /slots is read to see slots busy
+	// with traffic that did not come through this Olla. llama-swap nodes are
+	// watched live through /api/events instead and ignore it.
+	BusyPollInterval time.Duration `yaml:"busy_poll_interval"`
+	Enabled          bool          `yaml:"enabled"`
+	DiscoverSlots    bool          `yaml:"discover_slots"`
+	// TrackExternalLoad counts slots the backend reports busy beyond this
+	// Olla's own requests (other clients, other Olla instances) as taken.
+	TrackExternalLoad bool `yaml:"track_external_load"`
 }
 
 // ProxyConfig holds proxy-specific configuration

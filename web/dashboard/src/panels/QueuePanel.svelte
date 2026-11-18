@@ -7,7 +7,7 @@
   import { fmtInt, fmtMs, fmtDuration } from '../lib/format';
   import { queueRows, fmtClockTime, slotFillPct, type QueueRow } from '../lib/queue';
   import { getNow as liveNow } from '../lib/clock.svelte';
-  import type { QueueEndpointStats } from '../lib/types';
+  import type { QueueEndpointStats, QueueModelStats } from '../lib/types';
 
   // This panel owns the queue store lifecycle: the waiting list is only
   // fetched while the panel is open.
@@ -81,9 +81,18 @@
   ];
   const slotSort: SortState = { key: 'name', dir: 'asc' };
 
+  // Outside traffic occupies slots just as ours does, so fullness counts both.
   function fillCls(r: SlotRow): string {
-    if (r.in_use >= r.slots && r.slots > 0) return 'amber';
-    return r.in_use > 0 ? 'green' : 'neutral';
+    const taken = r.in_use + r.external;
+    if (taken >= r.slots && r.slots > 0) return 'amber';
+    return taken > 0 ? 'green' : 'neutral';
+  }
+
+  function modelTitle(m: QueueModelStats): string {
+    const ext = m.external > 0 ? `, ${m.external} by other clients` : '';
+    return m.slots > 0
+      ? `${m.model}: ${m.in_use} of ${m.slots} slots in use by Olla${ext}`
+      : `${m.model}: ${m.in_use} in use by Olla${ext}, no per-model limit reported`;
   }
 </script>
 
@@ -176,7 +185,7 @@
     <div class="section">
       <div class="section-head">
         <h3>Endpoint slots</h3>
-        <span class="section-note">endpoints appear once the queue has routed to them</span>
+        <span class="section-note">endpoints appear once the queue has routed to them · <span class="external">+N</span> = busy with other clients' traffic</span>
       </div>
       {#if slotRows.length > 0}
         <SortableTable columns={slotColumns} rows={slotRows} initialSort={slotSort} rowId={(row) => row.url}>
@@ -184,7 +193,7 @@
             <td class="col-sticky">{e.name}</td>
             <td class={cellClass('fill_pct')}>
               <span class="glyph g-{fillCls(e)}" aria-hidden="true">●</span>
-              {fmtInt(e.in_use)}<span class="unit">/ {fmtInt(e.slots)}</span>
+              {fmtInt(e.in_use)}{#if e.external > 0}<span class="external" title="Busy with traffic that did not come through this Olla">+{fmtInt(e.external)}</span>{/if}<span class="unit">/ {fmtInt(e.slots)}</span>
             </td>
             <td class={cellClass('models_in_use')}>
               {#if e.models.length > 0}
@@ -192,9 +201,9 @@
                   {#each e.models as m (m.model)}
                     <span
                       class="pill model-slot"
-                      class:is-full={m.slots > 0 && m.in_use >= m.slots}
-                      title={m.slots > 0 ? `${m.model}: ${m.in_use} of ${m.slots} slots in use` : `${m.model}: ${m.in_use} in use, no per-model limit reported`}
-                    >{m.model} <strong>{fmtInt(m.in_use)}{#if m.slots > 0}/{fmtInt(m.slots)}{/if}</strong></span>
+                      class:is-full={m.slots > 0 && m.in_use + m.external >= m.slots}
+                      title={modelTitle(m)}
+                    >{m.model} <strong>{fmtInt(m.in_use)}{#if m.external > 0}<span class="external">+{fmtInt(m.external)}</span>{/if}{#if m.slots > 0}/{fmtInt(m.slots)}{/if}</strong></span>
                   {/each}
                 </span>
               {:else}<span class="dash">—</span>{/if}
@@ -225,6 +234,9 @@
     flex-wrap: wrap;
     gap: 4px;
     justify-content: flex-end;
+  }
+  .external {
+    color: var(--blue);
   }
   .model-slot.is-full {
     color: var(--amber);

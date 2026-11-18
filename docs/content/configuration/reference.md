@@ -326,6 +326,8 @@ Caps in-flight requests per endpoint and holds the overflow in a FIFO queue unti
 | `queue.default_slots` | int | `1` | Slots for an endpoint with no `max_concurrent` and no discovered count |
 | `queue.discover_slots` | bool | `true` | Read slot counts from llama.cpp `/props` and llama-swap's running models |
 | `queue.slot_refresh_interval` | duration | `30s` | How often discovered slot counts are refreshed |
+| `queue.track_external_load` | bool | `true` | Count slots a backend reports busy with other clients' traffic as taken (llama-swap `/api/events`, llama.cpp `/slots`). Needs `discover_slots` |
+| `queue.busy_poll_interval` | duration | `1s` | How often llama.cpp `/slots` is read for external load; llama-swap is watched live instead |
 
 **Environment Variables**: `OLLA_PROXY_QUEUE_ENABLED`, `OLLA_PROXY_QUEUE_MAX_SIZE`, `OLLA_PROXY_QUEUE_TIMEOUT`
 

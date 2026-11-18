@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"sync"
 	"time"
 
@@ -32,11 +33,27 @@ var slotProbeTypes = map[string]struct{}{
 	"openai":            {},
 }
 
+// Backend kinds discovery can tell apart. They decide how busy slots are
+// watched (see BusyTracker).
+const (
+	backendLlamaCpp  = "llamacpp"  // single-model llama-server
+	backendRouter    = "router"    // llama-server router mode
+	backendLlamaSwap = "llamaswap" // llama-swap
+)
+
 // discoveredSlots is what a probe learnt about one endpoint. models is nil for
 // a single-model llama.cpp server, whose slots are simply the endpoint's.
 type discoveredSlots struct {
 	models map[string]int
+	kind   string
 	total  int // 0 = nothing usable learnt; the endpoint falls back
+}
+
+// busyTarget is one discovered endpoint as the BusyTracker needs it.
+type busyTarget struct {
+	ep     *domain.Endpoint
+	kind   string
+	models []string
 }
 
 // SlotDiscoverer resolves endpoint and per-model concurrency limits, learning
@@ -60,11 +77,14 @@ type SlotDiscoverer struct {
 	endpoints  func(ctx context.Context) ([]*domain.Endpoint, error)
 	onChange   func()
 	discovered map[string]discoveredSlots
-	stopCh     chan struct{}
-	interval   time.Duration
-	fallback   int
-	mu         sync.RWMutex
-	stopOnce   sync.Once
+	// lastSeen holds the endpoint each discovered URL was probed through, so
+	// the BusyTracker reuses its auth and headers.
+	lastSeen map[string]*domain.Endpoint
+	stopCh   chan struct{}
+	interval time.Duration
+	fallback int
+	mu       sync.RWMutex
+	stopOnce sync.Once
 }
 
 // NewSlotDiscoverer builds a discoverer that refreshes every interval. endpoints
@@ -81,6 +101,7 @@ func NewSlotDiscoverer(endpoints func(ctx context.Context) ([]*domain.Endpoint, 
 		fallback:   fallback,
 		interval:   interval,
 		discovered: make(map[string]discoveredSlots),
+		lastSeen:   make(map[string]*domain.Endpoint),
 		stopCh:     make(chan struct{}),
 	}
 }
@@ -176,6 +197,7 @@ func (d *SlotDiscoverer) Refresh(ctx context.Context) {
 			continue
 		}
 		d.mu.Lock()
+		d.lastSeen[ep.URLString] = ep
 		if !sameSlots(d.discovered[ep.URLString], found) {
 			d.discovered[ep.URLString] = found
 			changed = true
@@ -193,7 +215,7 @@ func (d *SlotDiscoverer) Refresh(ctx context.Context) {
 }
 
 func sameSlots(a, b discoveredSlots) bool {
-	if a.total != b.total || len(a.models) != len(b.models) || (a.models == nil) != (b.models == nil) {
+	if a.kind != b.kind || a.total != b.total || len(a.models) != len(b.models) || (a.models == nil) != (b.models == nil) {
 		return false
 	}
 	for m, n := range a.models {
@@ -213,7 +235,9 @@ func (d *SlotDiscoverer) probe(ctx context.Context, ep *domain.Endpoint) (discov
 				loaded = append(loaded, id)
 			}
 		}
-		return d.probeModels(ctx, ep, loaded), nil
+		found := d.probeModels(ctx, ep, loaded)
+		found.kind = backendLlamaSwap
+		return found, nil
 	}
 
 	// Single-model llama.cpp answers /props directly. Router mode refuses
@@ -227,7 +251,7 @@ func (d *SlotDiscoverer) probe(ctx context.Context, ep *domain.Endpoint) (discov
 		if slotsErr != nil {
 			return discoveredSlots{}, slotsErr
 		}
-		return discoveredSlots{total: n}, nil
+		return discoveredSlots{total: n, kind: backendLlamaCpp}, nil
 	}
 
 	// llama.cpp router mode: /models carries a per-model status. A plain
@@ -245,7 +269,30 @@ func (d *SlotDiscoverer) probe(ctx context.Context, ep *domain.Endpoint) (discov
 			loaded = append(loaded, id)
 		}
 	}
-	return d.probeModels(ctx, ep, loaded), nil
+	found := d.probeModels(ctx, ep, loaded)
+	found.kind = backendRouter
+	return found, nil
+}
+
+// busyTargets lists every endpoint discovery has identified, with its kind and
+// loaded models. Endpoints are remembered from the last Refresh.
+func (d *SlotDiscoverer) busyTargets() []busyTarget {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := make([]busyTarget, 0, len(d.discovered))
+	for url, ds := range d.discovered {
+		ep, ok := d.lastSeen[url]
+		if !ok || ds.kind == "" {
+			continue
+		}
+		t := busyTarget{ep: ep, kind: ds.kind}
+		for m := range ds.models {
+			t.models = append(t.models, m)
+		}
+		sort.Strings(t.models)
+		out = append(out, t)
+	}
+	return out
 }
 
 // probeModels reads total_slots for each loaded model. A multi-model node with
@@ -275,27 +322,11 @@ func totalSlots(body []byte) (int, error) {
 }
 
 func (d *SlotDiscoverer) get(ctx context.Context, ep *domain.Endpoint, pathAndQuery string) ([]byte, int, error) {
-	ref, err := url.Parse(pathAndQuery)
-	if err != nil {
-		return nil, 0, err
-	}
-	if ep.URL == nil {
-		return nil, 0, fmt.Errorf("endpoint %s has no URL", ep.Name)
-	}
-	target := ep.URL.JoinPath(ref.Path)
-	target.RawQuery = ref.RawQuery
-
 	ctx, cancel := context.WithTimeout(ctx, slotProbeTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	req, err := newBackendRequest(ctx, ep, pathAndQuery)
 	if err != nil {
 		return nil, 0, err
-	}
-	for k, v := range ep.Headers {
-		req.Header.Set(k, v)
-	}
-	if ep.AuthHeaderName != "" {
-		req.Header.Set(ep.AuthHeaderName, ep.AuthHeaderValue)
 	}
 
 	resp, err := d.client.Do(req)

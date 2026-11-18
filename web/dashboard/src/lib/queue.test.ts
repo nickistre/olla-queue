@@ -132,7 +132,7 @@ describe('parseQueue', () => {
     expect(
       parseQueue({ enabled: true, endpoints: [{ name: 'n', models: [{ model: 'q', slots: 2, in_use: 1 }] }] })
         ?.endpoints[0].models[0],
-    ).toEqual({ model: 'q', slots: 2, in_use: 1 });
+    ).toEqual({ model: 'q', slots: 2, in_use: 1, external: 0 });
     expect(q?.waiting[0].sticky_endpoint).toBe('');
     expect(q?.endpoints).toEqual([]);
   });

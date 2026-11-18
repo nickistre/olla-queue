@@ -104,6 +104,8 @@ func DefaultConfig() *Config {
 				DefaultSlots:        1,
 				DiscoverSlots:       true,
 				SlotRefreshInterval: 30 * time.Second,
+				TrackExternalLoad:   true,
+				BusyPollInterval:    time.Second,
 			},
 		},
 		Discovery: DiscoveryConfig{
@@ -582,6 +584,9 @@ func (c *Config) validateQueue() error {
 	}
 	if q.DiscoverSlots && q.SlotRefreshInterval <= 0 {
 		return errors.New("proxy.queue.slot_refresh_interval must be > 0 when discover_slots is enabled (prevents ticker panic)")
+	}
+	if q.TrackExternalLoad && q.BusyPollInterval <= 0 {
+		return errors.New("proxy.queue.busy_poll_interval must be > 0 when track_external_load is enabled (prevents ticker panic)")
 	}
 	return nil
 }
