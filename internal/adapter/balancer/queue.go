@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -128,16 +129,21 @@ type queueResult struct {
 }
 
 type queueWaiter struct {
-	ctx        context.Context
 	enqueuedAt time.Time
-	caller     domain.QueueCaller // copied at enqueue for the stats listing
-	ready      chan queueResult   // buffered 1, written once under q.mu
-	elem       *list.Element      // nil once removed from the queue
 	// holdUntil ends the wait for a busy pinned endpoint (sticky hold); zero
 	// when holding is off. holdTimer wakes the queue at that moment, since no
 	// slot release may come along to re-evaluate the request.
-	holdUntil  time.Time
-	holdTimer  *time.Timer
+	holdUntil time.Time
+	ctx       context.Context
+	ready     chan queueResult // buffered 1, written once under q.mu
+	elem      *list.Element    // nil once removed from the queue
+	holdTimer *time.Timer
+	// refresher re-runs the handler's endpoint lookup; refresh signals that a
+	// backend recovered and it is worth calling. Both nil when the handler
+	// gave no refresher, so the wait never selects on refresh.
+	refresher  domain.QueueRefresher
+	refresh    chan struct{}
+	caller     domain.QueueCaller // copied at enqueue for the stats listing
 	stickyKey  string
 	candidates []*domain.Endpoint
 }
@@ -179,12 +185,16 @@ type QueueWrapper struct {
 	// unique per request; see reserveLocked.
 	reservations map[*domain.Endpoint]reservation
 	known        map[string]*domain.Endpoint
-	waiters      list.List
-	stats        queueCounters
-	cfg          config.QueueConfig
-	holdFor      time.Duration
-	mu           sync.Mutex
-	closed       bool
+	// down holds endpoints the health checker has reported offline, with when.
+	// A request's endpoint copies are snapshots from when it arrived, so their
+	// Status goes stale while it waits; this is the live view.
+	down    map[string]time.Time
+	waiters list.List
+	stats   queueCounters
+	cfg     config.QueueConfig
+	holdFor time.Duration
+	mu      sync.Mutex
+	closed  bool
 }
 
 type queueCounters struct {
@@ -227,6 +237,7 @@ func NewQueueWrapper(inner domain.EndpointSelector, cfg config.QueueConfig, reso
 		groupExternal: make(map[string]int),
 		reservations:  make(map[*domain.Endpoint]reservation),
 		known:         make(map[string]*domain.Endpoint),
+		down:          make(map[string]time.Time),
 		modelOf:       requestedModel,
 	}
 }
@@ -278,8 +289,17 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 		q.mu.Unlock()
 		return nil, ErrQueueClosed
 	}
+	recovered := false
 	for _, ep := range endpoints {
 		q.known[ep.URLString] = ep
+		if q.clearIfFreshLocked(ep) {
+			recovered = true
+		}
+	}
+	if recovered {
+		// Waiters go first: the slot this request would take may be one they
+		// have been waiting for.
+		q.dispatchLocked()
 	}
 
 	now := time.Now()
@@ -299,9 +319,16 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 		return ep, err
 	}
 
-	if !q.anyRoutable(endpoints) {
+	if !q.anyUpLocked(endpoints) {
 		q.mu.Unlock()
-		// Nothing to wait for; let the inner selector produce its usual error.
+		// Nothing to wait for. Copies that still look routable were taken
+		// before the health checker marked them down, and the inner selector
+		// would pick one; otherwise let it produce its usual error.
+		for _, ep := range endpoints {
+			if ep.Status.IsRoutable() {
+				return nil, ErrQueueEndpointsGone
+			}
+		}
 		return q.inner.Select(ctx, endpoints)
 	}
 
@@ -322,6 +349,10 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 	if caller, ok := ctx.Value(constants.ContextQueueCallerKey).(*domain.QueueCaller); ok && caller != nil {
 		w.caller = *caller
 	}
+	if refresher, ok := ctx.Value(constants.ContextQueueRefreshKey).(domain.QueueRefresher); ok && refresher != nil {
+		w.refresher = refresher
+		w.refresh = make(chan struct{}, 1)
+	}
 	if !holdUntil.IsZero() {
 		// When the hold lapses the request may take any free endpoint, but a
 		// free one may already be sitting idle with no release coming.
@@ -335,17 +366,9 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 	storeMax(&q.stats.peakDepth, depth)
 	slog.Debug("request queued", "depth", depth, "candidates", len(endpoints))
 
-	timer := time.NewTimer(q.cfg.Timeout)
-	defer timer.Stop()
-
-	var waitErr error
-	select {
-	case res := <-w.ready:
+	res, waitErr := q.await(ctx, w)
+	if waitErr == nil {
 		return q.finishWait(w, outcome, res)
-	case <-ctx.Done():
-		waitErr = ctx.Err()
-	case <-timer.C:
-		waitErr = ErrQueueTimeout
 	}
 
 	q.mu.Lock()
@@ -364,7 +387,7 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 
 	// Dispatch won the race: a slot is already reserved for us. Using it is
 	// pointless if the client has gone, so hand it straight back.
-	res := <-w.ready
+	res = <-w.ready
 	if res.err == nil && ctx.Err() != nil {
 		q.mu.Lock()
 		q.releaseLocked(res.endpoint)
@@ -374,6 +397,27 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 		return nil, ctx.Err()
 	}
 	return q.finishWait(w, outcome, res)
+}
+
+// await blocks until w is dispatched, its context ends or queue.timeout
+// passes, running the request's endpoint lookup again whenever a recovery
+// signals it.
+func (q *QueueWrapper) await(ctx context.Context, w *queueWaiter) (queueResult, error) {
+	timer := time.NewTimer(q.cfg.Timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case res := <-w.ready:
+			return res, nil
+		case <-w.refresh:
+			// Outside q.mu: the lookup goes through the registry and discovery.
+			q.addCandidates(w, w.refresher(ctx))
+		case <-ctx.Done():
+			return queueResult{}, ctx.Err()
+		case <-timer.C:
+			return queueResult{}, ErrQueueTimeout
+		}
+	}
 }
 
 func (q *QueueWrapper) finishWait(w *queueWaiter, outcome *domain.QueueOutcome, res queueResult) (*domain.Endpoint, error) {
@@ -484,8 +528,10 @@ func (q *QueueWrapper) Wake() {
 	q.mu.Unlock()
 }
 
-// PurgeDeadEndpoints fails queued requests whose candidates are all outside the
-// routable set, so they get an answer now instead of waiting out the timeout.
+// PurgeDeadEndpoints records which endpoints have left the routable set, so
+// waiters stop being handed them, and fails queued requests whose candidates
+// are all gone, so they get an answer now instead of waiting out the timeout.
+// An endpoint back in the set counts as recovered.
 func (q *QueueWrapper) PurgeDeadEndpoints(routable []*domain.Endpoint) {
 	alive := make(map[string]struct{}, len(routable))
 	for _, ep := range routable {
@@ -494,6 +540,23 @@ func (q *QueueWrapper) PurgeDeadEndpoints(routable []*domain.Endpoint) {
 
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	now := time.Now()
+	for url := range q.known {
+		if _, ok := alive[url]; !ok {
+			if _, already := q.down[url]; !already {
+				q.down[url] = now
+			}
+		}
+	}
+	recovered := false
+	for url := range alive {
+		if _, wasDown := q.down[url]; wasDown {
+			delete(q.down, url)
+			q.signalRefreshLocked(url)
+			recovered = true
+		}
+	}
+
 	for e := q.waiters.Front(); e != nil; {
 		next := e.Next()
 		w := waiterAt(e)
@@ -510,6 +573,111 @@ func (q *QueueWrapper) PurgeDeadEndpoints(routable []*domain.Endpoint) {
 		}
 		e = next
 	}
+	if recovered {
+		q.dispatchLocked()
+	}
+}
+
+// EndpointRecovered is the health checker's recovery hook. The endpoint takes
+// traffic again, and requests already queued are told to look it up: it was
+// left out of their candidates if it was offline when they arrived.
+func (q *QueueWrapper) EndpointRecovered(ep *domain.Endpoint) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.down, ep.URLString)
+	q.signalRefreshLocked(ep.URLString)
+	q.dispatchLocked()
+}
+
+// EndpointFailed marks ep down when a connection to it fails. The retry
+// handler calls it before releasing the failed attempt's slot, so the slot
+// isn't handed to a waiter that would hit the same dead backend. The health
+// checker's recovery hook, or a newer routable copy, clears it.
+func (q *QueueWrapper) EndpointFailed(ep *domain.Endpoint) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if _, already := q.down[ep.URLString]; !already {
+		q.down[ep.URLString] = time.Now()
+	}
+}
+
+// signalRefreshLocked nudges every waiter that could gain url as a candidate.
+// The signal is a buffered slot, so a burst of recoveries costs one lookup.
+func (q *QueueWrapper) signalRefreshLocked(url string) {
+	for e := q.waiters.Front(); e != nil; e = e.Next() {
+		w := waiterAt(e)
+		if w.refresh == nil || hasURL(w.candidates, url) {
+			continue
+		}
+		select {
+		case w.refresh <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// addCandidates merges a refreshed endpoint list into a waiter's candidates.
+// Only endpoints of a type the request already had are taken: the handler may
+// have shaped the request for that backend type (passthrough, path rewrites),
+// and a different type could need a different request.
+func (q *QueueWrapper) addCandidates(w *queueWaiter, eps []*domain.Endpoint) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if w.elem == nil {
+		return // dispatched or failed while the lookup ran
+	}
+	types := make(map[string]struct{}, len(w.candidates))
+	for _, ep := range w.candidates {
+		types[ep.Type] = struct{}{}
+	}
+	var added []*domain.Endpoint
+	for _, ep := range eps {
+		if _, ok := types[ep.Type]; !ok || hasURL(w.candidates, ep.URLString) {
+			continue
+		}
+		q.known[ep.URLString] = ep
+		q.clearIfFreshLocked(ep)
+		added = append(added, ep)
+	}
+	if len(added) == 0 {
+		return
+	}
+	// Clip so the append never writes into the retry handler's slice.
+	w.candidates = append(slices.Clip(w.candidates), added...)
+	slog.Debug("queued request gained candidates", "added", len(added), "candidates", len(w.candidates))
+	q.dispatchLocked()
+}
+
+// clearIfFreshLocked drops ep from down when ep is a copy taken after the
+// health checker marked it down and it was routable then. That catches a
+// recovery the hooks missed, such as offline straight to busy.
+func (q *QueueWrapper) clearIfFreshLocked(ep *domain.Endpoint) bool {
+	downAt, isDown := q.down[ep.URLString]
+	if !isDown || !ep.Status.IsRoutable() || !ep.LastChecked.After(downAt) {
+		return false
+	}
+	delete(q.down, ep.URLString)
+	q.signalRefreshLocked(ep.URLString)
+	return true
+}
+
+// upLocked reports whether ep can take traffic now, going by the health
+// checker's live view rather than the request's possibly stale copy.
+func (q *QueueWrapper) upLocked(ep *domain.Endpoint) bool {
+	if !ep.Status.IsRoutable() {
+		return false
+	}
+	_, isDown := q.down[ep.URLString]
+	return !isDown
+}
+
+func hasURL(eps []*domain.Endpoint, url string) bool {
+	for _, ep := range eps {
+		if ep.URLString == url {
+			return true
+		}
+	}
+	return false
 }
 
 // Stop fails every queued request and rejects new ones. Safe to call more than once.
@@ -604,7 +772,7 @@ func (q *QueueWrapper) admissibleLocked(ctx context.Context, candidates []*domai
 	}
 	pinnedIsCandidate := false
 	for _, ep := range candidates {
-		if ep.URLString == pinned && ep.Status.IsRoutable() {
+		if ep.URLString == pinned && q.upLocked(ep) {
 			pinnedIsCandidate = true
 			break
 		}
@@ -729,7 +897,7 @@ func decrementOrDelete(m map[string]int, k string) {
 func (q *QueueWrapper) freeLocked(ctx context.Context, endpoints []*domain.Endpoint) []*domain.Endpoint {
 	var free []*domain.Endpoint
 	for _, ep := range endpoints {
-		if !ep.Status.IsRoutable() {
+		if !q.upLocked(ep) {
 			continue
 		}
 		slots, _ := q.resolver.Slots(ep)
@@ -753,9 +921,9 @@ func (q *QueueWrapper) freeLocked(ctx context.Context, endpoints []*domain.Endpo
 	return free
 }
 
-func (q *QueueWrapper) anyRoutable(endpoints []*domain.Endpoint) bool {
+func (q *QueueWrapper) anyUpLocked(endpoints []*domain.Endpoint) bool {
 	for _, ep := range endpoints {
-		if ep.Status.IsRoutable() {
+		if q.upLocked(ep) {
 			return true
 		}
 	}

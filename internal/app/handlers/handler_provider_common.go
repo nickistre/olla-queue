@@ -103,6 +103,9 @@ func (a *Application) providerProxyHandler(w http.ResponseWriter, r *http.Reques
 		ctx, r, _ = a.injectStickyKey(ctx, r, a.canonicalModelName(pr.model))
 	}
 
+	pr.resolveEndpoints = func(ctx context.Context, pr *proxyRequest) ([]*domain.Endpoint, error) {
+		return a.getProviderEndpoints(ctx, providerType, pr)
+	}
 	endpoints, err := a.getProviderEndpoints(ctx, providerType, pr)
 	if err != nil {
 		a.handleEndpointError(w, pr, err)

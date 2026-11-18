@@ -20,10 +20,13 @@ import (
 )
 
 type proxyRequest struct {
-	requestLogger            logger.StyledLogger
-	stats                    *ports.RequestStats
-	profile                  *domain.RequestProfile
-	endpointPaths            map[string]string
+	requestLogger logger.StyledLogger
+	stats         *ports.RequestStats
+	profile       *domain.RequestProfile
+	endpointPaths map[string]string
+	// resolveEndpoints is the lookup that produced this request's candidates,
+	// kept so a queued request can run it again when a backend recovers.
+	resolveEndpoints         func(ctx context.Context, pr *proxyRequest) ([]*domain.Endpoint, error)
 	clientIP                 string
 	targetPath               string
 	model                    string
@@ -62,6 +65,7 @@ func (a *Application) proxyHandler(w http.ResponseWriter, r *http.Request) {
 		ctx, r, _ = a.injectStickyKey(ctx, r, a.canonicalModelName(pr.model))
 	}
 
+	pr.resolveEndpoints = a.getCompatibleEndpoints
 	endpoints, err := a.getCompatibleEndpoints(ctx, pr)
 	if err != nil {
 		a.handleEndpointError(w, pr, err)

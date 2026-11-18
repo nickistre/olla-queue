@@ -139,3 +139,10 @@ type EndpointSelector interface {
 	IncrementConnections(endpoint *Endpoint)
 	DecrementConnections(endpoint *Endpoint)
 }
+
+// EndpointFailureObserver is an optional EndpointSelector extension. The retry
+// handler calls EndpointFailed when a connection to the endpoint fails, before
+// it releases the attempt with DecrementConnections.
+type EndpointFailureObserver interface {
+	EndpointFailed(endpoint *Endpoint)
+}

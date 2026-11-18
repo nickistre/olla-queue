@@ -399,5 +399,6 @@ func (s *ProxyServiceWrapper) applyQueue() {
 
 	if s.discoverySvc != nil {
 		s.discoverySvc.SetPurgeDeadEndpointsFn(s.PurgeDeadEndpoints)
+		s.discoverySvc.SetEndpointRecoveredFn(s.queueWrapper.EndpointRecovered)
 	}
 }

@@ -348,13 +348,24 @@ func (h *RetryHandler) resetRequestBodyForRetry(r *http.Request, bodyBytes []byt
 }
 
 // executeProxyAttempt executes a single proxy attempt with connection counting
-func (h *RetryHandler) executeProxyAttempt(ctx context.Context, w http.ResponseWriter, r *http.Request,
-	endpoint *domain.Endpoint, selector domain.EndpointSelector, stats *ports.RequestStats, proxyFunc ProxyFunc) error {
+func (h *RetryHandler) executeProxyAttempt(ctx context.Context, tracker *ResponseStartedWriter, r *http.Request,
+	endpoint *domain.Endpoint, selector domain.EndpointSelector, stats *ports.RequestStats, proxyFunc ProxyFunc) (err error) {
 
 	selector.IncrementConnections(endpoint)
-	defer selector.DecrementConnections(endpoint)
+	defer func() {
+		// Report the failure before the release, under the same conditions the
+		// retry loop demotes the endpoint on. The demotion only happens after
+		// this returns, and a request queue would otherwise hand the freed slot
+		// straight to a waiter, sending it to the same dead backend.
+		if !tracker.started && !errors.Is(err, ErrCircuitBreakerOpen) && IsConnectionError(err) {
+			if o, ok := selector.(domain.EndpointFailureObserver); ok {
+				o.EndpointFailed(endpoint)
+			}
+		}
+		selector.DecrementConnections(endpoint)
+	}()
 
-	return proxyFunc(ctx, w, r, endpoint, stats)
+	return proxyFunc(ctx, tracker, r, endpoint, stats)
 }
 
 // handleConnectionFailure processes connection failures and manages endpoint removal.

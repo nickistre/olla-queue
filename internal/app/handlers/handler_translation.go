@@ -556,6 +556,7 @@ func (a *Application) translationHandler(trans translator.RequestTranslator) htt
 		}
 
 		// Get compatible endpoints for this request
+		pr.resolveEndpoints = a.getCompatibleEndpoints
 		endpoints, err := a.getCompatibleEndpoints(ctx, pr)
 		if err != nil {
 			a.writeTranslatorError(w, trans, pr, errors.New("no healthy endpoints available"), http.StatusServiceUnavailable)
@@ -694,6 +695,9 @@ func (a *Application) prepareProxyContext(ctx context.Context, r *http.Request, 
 			Model:     pr.model,
 			UserAgent: pr.userAgent,
 		})
+		if pr.resolveEndpoints != nil {
+			ctx = context.WithValue(ctx, constants.ContextQueueRefreshKey, a.queueRefresher(pr))
+		}
 		r = r.WithContext(ctx)
 	}
 

@@ -39,6 +39,9 @@ type DiscoveryService struct {
 	// Stored atomically because SetPurgeDeadEndpointsFn is called from the main goroutine
 	// while the health-check goroutine may concurrently invoke the callback.
 	purgeDeadFn atomic.Pointer[func([]*domain.Endpoint)]
+	// recoveredFn, when set, is called after a backend recovers (and its models
+	// are rediscovered), so the request queue can hand it to waiting requests.
+	recoveredFn atomic.Pointer[func(*domain.Endpoint)]
 }
 
 // NewDiscoveryService creates a new discovery service
@@ -160,25 +163,6 @@ func (s *DiscoveryService) Start(ctx context.Context) error {
 		}
 		s.modelDiscovery = discovery.NewModelDiscoveryService(client, s.endpointRepo, s.registry, discoveryConfig, s.logger)
 
-		// Set up recovery callback to trigger model discovery when endpoints recover
-		s.healthChecker.SetRecoveryCallback(health.RecoveryCallbackFunc(func(ctx context.Context, endpoint *domain.Endpoint) error {
-			s.logger.Info("Triggering model discovery for recovered endpoint",
-				"endpoint", endpoint.Name,
-				"url", endpoint.GetURLString())
-
-			// Discover models for the recovered endpoint
-			if err := s.modelDiscovery.DiscoverEndpoint(ctx, endpoint); err != nil {
-				s.logger.Warn("Failed to discover models for recovered endpoint",
-					"endpoint", endpoint.Name,
-					"error", err)
-				return err
-			}
-
-			s.logger.Info("Successfully refreshed models for recovered endpoint",
-				"endpoint", endpoint.Name)
-			return nil
-		}))
-
 		if err := s.modelDiscovery.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start model discovery: %w", err)
 		}
@@ -188,6 +172,33 @@ func (s *DiscoveryService) Start(ctx context.Context) error {
 			s.logger.Warn("Initial model discovery failed", "error", err)
 		}
 	}
+
+	// Set up recovery callback: rediscover the endpoint's models first, so
+	// requests the recovery hook re-routes can see what it serves.
+	s.healthChecker.SetRecoveryCallback(health.RecoveryCallbackFunc(func(ctx context.Context, endpoint *domain.Endpoint) error {
+		if fn := s.recoveredFn.Load(); fn != nil {
+			defer (*fn)(endpoint)
+		}
+		if s.modelDiscovery == nil {
+			return nil
+		}
+
+		s.logger.Info("Triggering model discovery for recovered endpoint",
+			"endpoint", endpoint.Name,
+			"url", endpoint.GetURLString())
+
+		// Discover models for the recovered endpoint
+		if err := s.modelDiscovery.DiscoverEndpoint(ctx, endpoint); err != nil {
+			s.logger.Warn("Failed to discover models for recovered endpoint",
+				"endpoint", endpoint.Name,
+				"error", err)
+			return err
+		}
+
+		s.logger.Info("Successfully refreshed models for recovered endpoint",
+			"endpoint", endpoint.Name)
+		return nil
+	}))
 
 	s.logger.Info("Discovery service initialised",
 		"type", s.config.Type,
@@ -288,6 +299,12 @@ func (s *DiscoveryService) SetStatsService(statsService *StatsService) {
 // to evict sticky session entries for dead backends without waiting for TTL expiry.
 func (s *DiscoveryService) SetPurgeDeadEndpointsFn(fn func([]*domain.Endpoint)) {
 	s.purgeDeadFn.Store(&fn)
+}
+
+// SetEndpointRecoveredFn registers a function to call when a backend recovers,
+// after its models have been rediscovered.
+func (s *DiscoveryService) SetEndpointRecoveredFn(fn func(*domain.Endpoint)) {
+	s.recoveredFn.Store(&fn)
 }
 
 // UpdateEndpointStatus updates the status of an endpoint in the repository

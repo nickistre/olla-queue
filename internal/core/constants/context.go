@@ -27,6 +27,9 @@ const (
 	// ContextQueueCallerKey carries a *domain.QueueCaller so queued requests
 	// can be listed with who sent them.
 	ContextQueueCallerKey = contextKey("queue-caller")
+	// ContextQueueRefreshKey carries a domain.QueueRefresher so a queued
+	// request can pick up backends that recover while it waits.
+	ContextQueueRefreshKey = contextKey("queue-refresh")
 
 	// ContextModelAliasMapKey stores a map[string]string of endpoint URL → actual model name
 	// when a model alias is resolved, allowing the proxy to rewrite the model name in the

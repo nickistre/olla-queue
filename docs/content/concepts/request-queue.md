@@ -142,6 +142,15 @@ If a reading isn't available, the outside count is cleared and Olla counts only 
 
 The Queue tab shows outside traffic as a blue `+N` next to Olla's own count, per endpoint, slot group and model.
 
+## Offline endpoints
+
+The queue follows the health checker, not the request's own view of the endpoints, which was fixed when the request arrived:
+
+- **An endpoint goes offline**, reported by the health checker or by a request failing to connect to it. Waiting requests stop being handed it, even when its slots free up because its in-flight requests failed. A request with no other candidate left gets a `503` straight away instead of waiting out `queue.timeout`.
+- **An endpoint recovers.** Waiting requests can use it again. A request that arrived while it was offline didn't have it as a candidate, so it re-runs its endpoint lookup and adds the endpoint if the lookup now returns it. The endpoint must be the same backend type as the request's other candidates. A request using a model alias or per-endpoint paths only takes it if those already cover it.
+
+A request that fails to connect is retried as usual: the retry handler marks the endpoint unhealthy and selects again through the queue. A backend that crashes partway through a response can't be retried, and Olla doesn't treat it as down from that alone, so the next waiter may make one failed connection attempt to it before being queued again for another endpoint.
+
 ## When a request can't be served
 
 | Situation | Response |

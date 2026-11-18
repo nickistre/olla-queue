@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
@@ -127,6 +128,11 @@ type QueueCaller struct {
 	Model     string
 	UserAgent string
 }
+
+// QueueRefresher re-runs a request's endpoint lookup. A queued request calls it
+// when a backend recovers, since its candidate list was fixed when it arrived
+// and left out anything offline then. It runs on the request's own goroutine.
+type QueueRefresher func(ctx context.Context) []*Endpoint
 
 // StickyOutcome carries the result of a sticky session selection back to the
 // handler layer via context. The handler allocates it, passes it in context,
