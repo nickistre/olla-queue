@@ -1,9 +1,8 @@
 name: Build container image
 
-# Builds the fork's image into the Gitea package registry, e.g.
-# gitea.house.nickistre.net/home/olla-queue:latest. Gitea ignores
-# .github/workflows once this directory exists, so upstream's GitHub CI and
-# release jobs (which publish to ghcr.io) never run here.
+# Builds the fork's image into the Gitea package registry (vars.registry).
+# Gitea ignores .github/workflows once this directory exists, so upstream's
+# GitHub CI and release jobs (which publish to ghcr.io) never run here.
 on:
   push:
     branches: ['feat/**']
