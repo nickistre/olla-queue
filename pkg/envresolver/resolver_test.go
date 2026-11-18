@@ -332,6 +332,11 @@ func TestExpandWithFile(t *testing.T) {
 		if isWindows() {
 			t.Skip("permission simulation not supported on Windows")
 		}
+		// Root ignores mode bits, so the read succeeds. CI runners (e.g. Gitea
+		// act_runner job containers) commonly run as root.
+		if os.Geteuid() == 0 {
+			t.Skip("permission simulation not possible as root")
+		}
 		f := writeTemp(t, "secret")
 		require.NoError(t, os.Chmod(f, 0o000))
 		t.Cleanup(func() { os.Chmod(f, 0o600) })
