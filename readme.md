@@ -44,7 +44,7 @@ What the fork adds (all opt-in via `proxy.queue.enabled`):
 - **Smarter dispatch**: an optional sticky-session hold (`proxy.sticky_sessions.hold_seconds`), loaded models run before cold ones, and nodes that already have a model loaded are preferred.
 - **Dashboard**: queue depth and mean wait on the Overview, plus a Queue tab listing waiting requests and slot usage.
 
-Work happens on feature branches here, never merged back to `main`, which tracks upstream. Container images are built by a Gitea workflow. See [the request queue concept page](docs/content/concepts/request-queue.md) for configuration and behaviour.
+Work happens on feature branches here, never merged back to `main`, which tracks upstream. See [the request queue concept page](docs/content/concepts/request-queue.md) for configuration and behaviour.
 
 [Olla](https://tensorfoundry.io/products/olla) is a high-performance, low-overhead, low-latency proxy and load balancer for managing LLM infrastructure. It intelligently routes LLM requests across self-hosted inference nodes with a [wide variety](https://thushan.github.io/olla/integrations/overview/) of natively supported endpoints and extensible enough to support others. Olla provides model discovery and unified model catalogues within each provider, enabling seamless routing to available models on compatible endpoints.
 
