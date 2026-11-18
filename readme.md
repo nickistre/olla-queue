@@ -31,6 +31,21 @@
   </p>
 </div>
 
+## About This Fork
+
+This is a fork of [thushan/olla](https://github.com/thushan/olla) that adds a **request queue** for a home LLM cluster, where most nodes run llama.cpp behind [llama-swap](https://github.com/mostlygeek/llama-swap) and have only a slot or two per model. Upstream Olla has no capacity concept: it forwards every request and lets the backend queue it, which can trigger model swaps or overload a node. This fork makes Olla hold requests until a slot is free instead.
+
+What the fork adds (all opt-in via `proxy.queue.enabled`):
+
+- **Slot-aware queue**: requests wait FIFO (with skip-ahead) when every candidate endpoint is full, and get a 503 with `Retry-After` when the queue is full or the wait times out.
+- **Per-endpoint, per-model and per-group limits**: slots are discovered from llama.cpp (`/props`, router `/models`) and llama-swap (`/running`) without ever triggering a model load. They can be overridden with `max_concurrent` and endpoint `slot_groups`.
+- **Outside traffic tracking**: requests that other clients send straight to a backend count as taken slots (llama-swap `/api/events`, llama.cpp `/slots`).
+- **Cold-model gate**: a model that isn't loaded gets one slot, so Olla doesn't pile requests onto a node that is mid-swap.
+- **Smarter dispatch**: an optional sticky-session hold (`proxy.sticky_sessions.hold_seconds`), loaded models run before cold ones, and nodes that already have a model loaded are preferred.
+- **Dashboard**: queue depth and mean wait on the Overview, plus a Queue tab listing waiting requests and slot usage.
+
+Work happens on feature branches here, never merged back to `main`, which tracks upstream. Images are built by the Gitea workflow and published as `gitea.house.nickistre.net/home/olla-queue`. See [the request queue concept page](docs/content/concepts/request-queue.md) for configuration and behaviour.
+
 [Olla](https://tensorfoundry.io/products/olla) is a high-performance, low-overhead, low-latency proxy and load balancer for managing LLM infrastructure. It intelligently routes LLM requests across self-hosted inference nodes with a [wide variety](https://thushan.github.io/olla/integrations/overview/) of natively supported endpoints and extensible enough to support others. Olla provides model discovery and unified model catalogues within each provider, enabling seamless routing to available models on compatible endpoints.
 
 Olla works alongside API gateways like [LiteLLM](https://github.com/BerriAI/litellm) or orchestration platforms like [GPUStack](https://github.com/gpustack/gpustack), focusing on making your **existing** LLM infrastructure reliable through intelligent routing and failover. You can choose between two proxy engines: **Sherpa** for simplicity and maintainability or **Olla** for maximum performance with advanced features like circuit breakers and connection pooling.
