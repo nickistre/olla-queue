@@ -3,6 +3,7 @@
 import type {
   ProcessStatsResponse,
   QueueEndpointStats,
+  QueueModelStats,
   QueueStatsResponse,
   QueueWaiter,
   StickyStatsResponse,
@@ -182,6 +183,9 @@ export const parseQueue = guarded((raw: unknown): QueueStatsResponse | null => {
     slot_source: str(e.slot_source),
     slots: num(e.slots),
     in_use: num(e.in_use),
+    models: arr(e.models)
+      .filter(isObj)
+      .map((m): QueueModelStats => ({ model: str(m.model), slots: num(m.slots), in_use: num(m.in_use) })),
   }));
   const waiting: QueueWaiter[] = arr(raw.waiting).filter(isObj).map((w) => ({
     enqueued_at: str(w.enqueued_at),

@@ -35,6 +35,7 @@ go run ./test/cmd/ollamock \
 | `--tei-kind` | `embedding` | Kind a TEI instance reports in `GET /info` `model_type` and serves: `embedding`, `reranker` or `classifier`. Routes for another kind answer 424 |
 | `--loaded` | (none) | Comma-separated models `GET /api/ps` reports as resident; empty reports none. Lets a fleet of instances hold different loaded sets |
 | `--total-slots` | `0` | Serve llama.cpp-style `GET /props` reporting this `total_slots`, for Olla's request queue slot discovery. `0` leaves `/props` unserved. `/props` ignores injected behaviour |
+| `--model-slots` | (none) | Act like llama-swap with several models loaded, e.g. `qwen=2,llama=3`: `GET /running` lists them as ready and `GET /props?model=<id>` reports each model's own `total_slots` (400 without `model`, 409 for one not listed). For testing the request queue's per-model limits |
 | `--tags-capabilities` | `false` | Emit per-model `capabilities` in `GET /api/tags`, as newer Ollama releases do: `["embedding"]` for names that look like embedders, otherwise `["completion"]` plus `"vision"` for names such as `qwen3-vl` or `llava` and `"tools"` for names such as `llama3.2` or `qwen3`. Off omits the field, which is what an older Ollama sends |
 
 ## Protocol Endpoints
@@ -46,7 +47,8 @@ go run ./test/cmd/ollamock \
 | `GET /api/tags` | Ollama model listing (`capabilities` with `--tags-capabilities`) |
 | `GET /api/ps` | Ollama loaded models (from `--loaded`) |
 | `GET /api/version` | Ollama version |
-| `GET /props` | llama.cpp server properties (`total_slots`), only with `--total-slots` |
+| `GET /props` | llama.cpp server properties (`total_slots`), only with `--total-slots` or `--model-slots` (then per model via `?model=`) |
+| `GET /running` | llama-swap running models, only with `--model-slots` |
 | `POST /api/chat` | Ollama chat (streaming default) |
 | `POST /api/generate` | Ollama generate (streaming default) |
 | `POST /api/embed` | Ollama native embeddings (`input` string or array). Empty or absent input is a 200 with empty `embeddings`; a named model the instance does not serve is a 404; a body with no model is served |

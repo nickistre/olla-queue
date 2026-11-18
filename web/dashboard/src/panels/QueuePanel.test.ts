@@ -59,7 +59,19 @@ const busy = {
       candidates: 1,
     },
   ],
-  endpoints: [{ name: 'gpu-box', url: 'http://gpu:8080', slot_source: 'discovered', slots: 2, in_use: 2 }],
+  endpoints: [
+    {
+      name: 'gpu-box',
+      url: 'http://gpu:8080',
+      slot_source: 'discovered',
+      slots: 5,
+      in_use: 3,
+      models: [
+        { model: 'qwen3:8b', slots: 2, in_use: 2 },
+        { model: 'llama3.1:8b', slots: 3, in_use: 1 },
+      ],
+    },
+  ],
 };
 
 describe('QueuePanel', () => {
@@ -88,5 +100,17 @@ describe('QueuePanel', () => {
   it('shows the empty state when nothing is waiting', async () => {
     await renderWith({ ...busy, depth: 0, waiting: [] }, () => expect(queue.data?.waiting?.length).toBe(0));
     expect(document.body.textContent).toContain('Nothing is waiting');
+  });
+});
+
+describe('QueuePanel per-model slots', () => {
+  it('shows each model against its own limit and flags a full one', async () => {
+    await renderWith(busy, () => expect(queue.data?.endpoints?.[0]?.models?.length).toBe(2));
+    const pills = [...document.querySelectorAll('.model-slot')];
+    const text = pills.map((p) => p.textContent?.replace(/\s+/g, ' ').trim());
+    expect(text).toContain('qwen3:8b 2/2');
+    expect(text).toContain('llama3.1:8b 1/3');
+    expect(pills.find((p) => p.textContent?.includes('qwen3:8b'))?.classList.contains('is-full')).toBe(true);
+    expect(pills.find((p) => p.textContent?.includes('llama3.1:8b'))?.classList.contains('is-full')).toBe(false);
   });
 });

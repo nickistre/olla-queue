@@ -10,8 +10,10 @@ import (
 	"github.com/thushan/olla/internal/adapter/metrics"
 	"github.com/thushan/olla/internal/adapter/proxy"
 	proxyconfig "github.com/thushan/olla/internal/adapter/proxy/config"
+	proxycore "github.com/thushan/olla/internal/adapter/proxy/core"
 	"github.com/thushan/olla/internal/adapter/registry/profile"
 	"github.com/thushan/olla/internal/config"
+	"github.com/thushan/olla/internal/core/constants"
 	"github.com/thushan/olla/internal/core/domain"
 	"github.com/thushan/olla/internal/core/ports"
 	"github.com/thushan/olla/internal/logger"
@@ -355,6 +357,15 @@ func (s *ProxyServiceWrapper) applyQueue() {
 	}
 
 	qw := balancer.NewQueueWrapper(s.loadBalancer, cfg, resolver)
+	// Per-model slots are keyed by the name the backend serves, which an alias
+	// can make differ per endpoint; resolve it the way model stats do.
+	qw.SetModelResolver(func(ctx context.Context, ep *domain.Endpoint) string {
+		requested, _ := ctx.Value(constants.ContextModelKey).(string)
+		if requested == "" {
+			return ""
+		}
+		return proxycore.ResolvedModelName(ctx, ep, requested)
+	})
 	if s.stickyWrapper != nil {
 		qw.SetPinLookup(s.stickyWrapper.PinnedURLs)
 	}

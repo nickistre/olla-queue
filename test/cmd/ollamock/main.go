@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -40,6 +41,7 @@ func main() {
 	loaded := flag.String("loaded", "", "comma-separated models /api/ps reports as resident (empty = none)")
 	teiKind := flag.String("tei-kind", teiKindEmbedding, "kind of model a TEI instance reports in /info and serves: embedding, reranker or classifier")
 	totalSlots := flag.Int("total-slots", 0, "serve llama.cpp-style GET /props reporting this total_slots (0 = no /props)")
+	modelSlots := flag.String("model-slots", "", "act like llama-swap with several models loaded: comma-separated model=slots, e.g. qwen=2,llama=3")
 	flag.Parse()
 
 	if !slices.Contains([]string{teiKindEmbedding, teiKindReranker, teiKindClassifier}, *teiKind) {
@@ -59,6 +61,7 @@ func main() {
 		loaded:           parseLoaded(*loaded),
 		teiKind:          *teiKind,
 		totalSlots:       *totalSlots,
+		modelSlots:       parseModelSlots(*modelSlots),
 	}
 
 	srv := newServer(cfg)
@@ -118,6 +121,22 @@ func parseLoaded(s string) []string {
 	for _, p := range strings.Split(s, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// parseModelSlots reads "a=2,b=3". Malformed entries are skipped rather than
+// fatal: this is a test fixture, and a typo shows up as a missing model.
+func parseModelSlots(s string) map[string]int {
+	out := map[string]int{}
+	for _, p := range strings.Split(s, ",") {
+		name, n, ok := strings.Cut(strings.TrimSpace(p), "=")
+		if !ok || name == "" {
+			continue
+		}
+		if v, err := strconv.Atoi(n); err == nil && v > 0 {
+			out[name] = v
 		}
 	}
 	return out

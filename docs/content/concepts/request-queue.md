@@ -29,20 +29,36 @@ With the queue on, each endpoint has a number of **slots**. Olla only sends a re
 
 Nothing is written to the client while it waits, so streaming and non-streaming requests queue the same way.
 
-## Slots per endpoint
+## Slots per endpoint and per model
 
-Slots are resolved per endpoint, in this order:
+A request is only sent to an endpoint that has room at two levels:
+
+- **The endpoint** is under its own limit, and
+- **the model** the request will run is under its limit on that endpoint, when the backend reports one.
+
+Both levels matter when one node runs several models at once (llama-swap, or llama.cpp's router mode). Each model is its own llama-server with its own `--parallel` slots. The node's total says nothing about how many requests any single model can take. Take a node running `qwen` with 2 slots and `llama` with 3: its total is 5, but a third `qwen` request waits even while the node has room.
+
+### Endpoint limit
+
+Resolved in this order:
 
 1. `max_concurrent` on the endpoint in `discovery.static.endpoints`.
-2. **Discovered** from the backend when `queue.discover_slots` is true (the default). This applies to `llamacpp`, `openai-compatible` and `openai` endpoints:
-    - **llama-swap**: `GET /running` lists the loaded models. Olla then asks each `ready` model for `GET /props?model=<id>&autoload=false` and adds up `total_slots`. `autoload=false` means the probe never loads or swaps a model.
-    - **llama.cpp**: `GET /props` gives `total_slots`, which is the server's `--parallel` value.
+2. **Discovered** from the backend when `queue.discover_slots` is true (the default): the total of the slots below.
 3. `queue.default_slots` (default `1`).
 
-Discovered counts refresh every `queue.slot_refresh_interval`. A failed probe keeps the last known value. When a refresh finds more slots, waiting requests are dispatched straight away.
+### Model limits
 
-!!! note "Per-endpoint, not per-model"
-    Slots are counted per endpoint. When llama-swap runs several models at once, their slots are added together into one pool.
+Model limits are only ever discovered. Discovery applies to `llamacpp`, `openai-compatible` and `openai` endpoints, including ones with `max_concurrent` set:
+
+- **llama-swap**: `GET /running` lists the loaded models. Olla asks each `ready` model for `GET /props?model=<id>&autoload=false` and records its `total_slots`.
+- **llama.cpp router mode** (`--models-dir` / `--models-preset`): `GET /models` lists models with a `status`. Each `loaded` one is asked for `/props?model=<id>&autoload=false` the same way.
+- **llama.cpp, single model**: `GET /props` gives `total_slots` (the server's `--parallel`). With only one model there is no separate per-model limit.
+
+`autoload=false` means a probe never loads or swaps a model. A model that isn't loaded has no limit of its own. It is bounded only by the endpoint limit, and loading it is the backend's decision.
+
+The model name is the one the backend serves. If an [alias](model-aliases.md) maps to different names on different endpoints, each endpoint's limit is looked up under its own name.
+
+Discovered counts refresh every `queue.slot_refresh_interval`. A failed probe keeps the last known value. When a model is unloaded, its limit is dropped on the next refresh. If nothing is loaded, the endpoint falls back to `default_slots` rather than 0. When a refresh finds more slots, waiting requests are dispatched straight away.
 
 For backends that can't be probed (Ollama, vLLM, SGLang and others), set `max_concurrent` to match the backend's own concurrency, for example `OLLAMA_NUM_PARALLEL`.
 
@@ -59,7 +75,7 @@ For backends that can't be probed (Ollama, vLLM, SGLang and others), set `max_co
 ## Observability
 
 - `X-Olla-Queue-Wait-Ms`: a response header present when the request waited. It holds the total wait across retry attempts.
-- `GET /internal/stats/queue`: current depth, peak depth, counters (enqueued, dispatched, timed out, rejected, cancelled), average and maximum wait, and per-endpoint `slots`, `in_use` and `slot_source` (`config`, `discovered` or `default`). Returns `{"enabled": false}` when the queue is off.
+- `GET /internal/stats/queue`: current depth, peak depth, counters (enqueued, dispatched, timed out, rejected, cancelled), average and maximum wait, and per-endpoint `slots`, `in_use` and `slot_source` (`config`, `discovered` or `default`), with a `models` list giving each model's own `slots` and `in_use`. Returns `{"enabled": false}` when the queue is off.
 
 ```bash
 curl http://localhost:40114/internal/stats/queue | jq
@@ -78,7 +94,7 @@ The client IP honours `X-Forwarded-For` / `X-Real-IP` only from `server.rate_lim
 While the queue is on, the dashboard at `/internal/ui/` shows it in three places:
 - **Activity chart:** a dashed queue-depth line, with the current depth in the readout.
 - **Overview tiles:** "Queued requests" (depth against `max_size`) and "Mean queue wait". The mean covers the chart's window (about 15 minutes), so it reflects current conditions and clears once the queue drains.
-- **Queue tab:** the waiting requests and each endpoint's slot usage, including where its limit came from.
+- **Queue tab:** the waiting requests and each endpoint's slot usage, including where its limit came from and each model's use against its own limit.
 
 ## Configuration
 

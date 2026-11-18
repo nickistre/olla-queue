@@ -84,7 +84,17 @@ func TestSlotDiscoverer_LlamaSwapOnlyProbesReadyModelsWithoutAutoload(t *testing
 	d.Refresh(context.Background())
 
 	if n, _ := d.Slots(ep); n != 5 {
-		t.Fatalf("slots = %d, want 5 (2+3 from ready models)", n)
+		t.Fatalf("endpoint slots = %d, want 5 (2+3 from ready models)", n)
+	}
+	// Each model keeps its own count: qwen must not inherit the node's 5.
+	if n, ok := d.ModelSlots(ep, "qwen"); !ok || n != 2 {
+		t.Fatalf("qwen slots = %d/%v, want 2", n, ok)
+	}
+	if n, ok := d.ModelSlots(ep, "llama"); !ok || n != 3 {
+		t.Fatalf("llama slots = %d/%v, want 3", n, ok)
+	}
+	if _, ok := d.ModelSlots(ep, "gemma"); ok {
+		t.Fatal("a model that is still starting has no slot count yet")
 	}
 	for _, m := range probed {
 		if m == "gemma" {
@@ -124,5 +134,128 @@ func TestSlotDiscoverer_FallbacksAndOverrides(t *testing.T) {
 	d.Refresh(context.Background())
 	if n, src := d.Slots(probed); n != 3 || src != SlotSourceDiscovered {
 		t.Fatalf("after failed probe: %d/%s", n, src)
+	}
+}
+
+func TestSlotDiscoverer_LlamaCppRouterModePerModel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/props":
+			model := r.URL.Query().Get("model")
+			if model == "" {
+				http.Error(w, `{"error":"model name is missing from the request"}`, http.StatusBadRequest)
+				return
+			}
+			if r.URL.Query().Get("autoload") != "false" {
+				t.Errorf("probe for %q would load the model", model)
+			}
+			_, _ = w.Write([]byte(`{"total_slots": ` + map[string]string{"gemma": "4", "qwen": "1"}[model] + `}`))
+		case "/models":
+			_, _ = w.Write([]byte(`{"data":[
+				{"id":"gemma","status":{"value":"loaded"}},
+				{"id":"qwen","status":{"value":"loaded"}},
+				{"id":"phi","status":{"value":"unloaded"}}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	ep := probeEndpoint("router", "llamacpp", srv.URL)
+	d := NewSlotDiscoverer(staticEndpoints(ep), 1, 0, nil)
+	d.Refresh(context.Background())
+
+	if n, src := d.Slots(ep); n != 5 || src != SlotSourceDiscovered {
+		t.Fatalf("endpoint slots = %d/%s, want 5 discovered", n, src)
+	}
+	if n, _ := d.ModelSlots(ep, "qwen"); n != 1 {
+		t.Fatalf("qwen slots = %d, want 1", n)
+	}
+	if got := d.ModelSlotList(ep); len(got) != 2 || got["gemma"] != 4 {
+		t.Fatalf("model list = %v", got)
+	}
+}
+
+func TestSlotDiscoverer_NothingLoadedClearsStaleModelLimits(t *testing.T) {
+	var running atomic.Value
+	running.Store(`{"running":[{"model":"qwen","state":"ready"}]}`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/running":
+			_, _ = w.Write([]byte(running.Load().(string)))
+		case "/props":
+			_, _ = w.Write([]byte(`{"total_slots": 2}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	ep := probeEndpoint("swap", "openai-compatible", srv.URL)
+	var changes atomic.Int32
+	d := NewSlotDiscoverer(staticEndpoints(ep), 1, 0, func() { changes.Add(1) })
+	d.Refresh(context.Background())
+	if n, _ := d.ModelSlots(ep, "qwen"); n != 2 {
+		t.Fatalf("qwen slots = %d, want 2", n)
+	}
+
+	// llama-swap unloaded everything (TTL expiry). The node must fall back to
+	// the default limit, not 0, and qwen's old limit must not linger.
+	running.Store(`{"running":[]}`)
+	d.Refresh(context.Background())
+	if n, src := d.Slots(ep); n != 1 || src != SlotSourceDefault {
+		t.Fatalf("endpoint slots = %d/%s, want default 1", n, src)
+	}
+	if _, ok := d.ModelSlots(ep, "qwen"); ok {
+		t.Fatal("stale per-model limit survived the model being unloaded")
+	}
+	if changes.Load() != 2 {
+		t.Fatalf("onChange calls = %d, want 2", changes.Load())
+	}
+}
+
+func TestSlotDiscoverer_ConfigLimitStillGetsPerModelDiscovery(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/running":
+			_, _ = w.Write([]byte(`{"running":[{"model":"qwen","state":"ready"}]}`))
+		case "/props":
+			_, _ = w.Write([]byte(`{"total_slots": 2}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	ep := probeEndpoint("swap", "openai-compatible", srv.URL)
+	ep.MaxConcurrent = 3
+	d := NewSlotDiscoverer(staticEndpoints(ep), 1, 0, nil)
+	d.Refresh(context.Background())
+
+	if n, src := d.Slots(ep); n != 3 || src != SlotSourceConfig {
+		t.Fatalf("endpoint slots = %d/%s, want config 3", n, src)
+	}
+	if n, ok := d.ModelSlots(ep, "qwen"); !ok || n != 2 {
+		t.Fatalf("qwen slots = %d/%v, want discovered 2", n, ok)
+	}
+}
+
+func TestSlotDiscoverer_PlainModelsListIsNotARouter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			// An OpenAI-style listing with no per-model status.
+			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-oss"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	ep := probeEndpoint("vllm-ish", "openai-compatible", srv.URL)
+	d := NewSlotDiscoverer(staticEndpoints(ep), 2, 0, nil)
+	d.Refresh(context.Background())
+	if n, src := d.Slots(ep); n != 2 || src != SlotSourceDefault {
+		t.Fatalf("got %d/%s, want default 2", n, src)
 	}
 }

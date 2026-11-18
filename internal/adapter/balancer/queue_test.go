@@ -66,7 +66,7 @@ func TestQueue_FastPathUntilSlotsFull(t *testing.T) {
 
 	for i := range 2 {
 		ep, err := q.Select(context.Background(), eps)
-		if err != nil || ep != a {
+		if err != nil || ep == nil || ep.URLString != a.URLString {
 			t.Fatalf("select %d: got %v, %v", i, ep, err)
 		}
 	}
@@ -78,7 +78,7 @@ func TestQueue_FastPathUntilSlotsFull(t *testing.T) {
 	waitForDepth(t, q, 1)
 
 	q.DecrementConnections(a)
-	if r := mustReceive(t, ch); r.err != nil || r.endpoint != a {
+	if r := mustReceive(t, ch); r.err != nil || r.endpoint == nil || r.endpoint.URLString != a.URLString {
 		t.Fatalf("queued select: %+v", r)
 	}
 }
@@ -136,7 +136,7 @@ func TestQueue_SkipsWaiterWhoseEndpointsAreFull(t *testing.T) {
 
 	// Freeing b must serve the request behind the head, not wait on a.
 	q.DecrementConnections(b)
-	if r := mustReceive(t, forB); r.endpoint != b {
+	if r := mustReceive(t, forB); r.endpoint == nil || r.endpoint.URLString != b.URLString {
 		t.Fatalf("b waiter: %+v", r)
 	}
 	select {
@@ -145,7 +145,7 @@ func TestQueue_SkipsWaiterWhoseEndpointsAreFull(t *testing.T) {
 	default:
 	}
 	q.DecrementConnections(a)
-	if r := mustReceive(t, forA); r.endpoint != a {
+	if r := mustReceive(t, forA); r.endpoint == nil || r.endpoint.URLString != a.URLString {
 		t.Fatalf("a waiter: %+v", r)
 	}
 }
@@ -280,6 +280,9 @@ func (f fixedSlots) Slots(ep *domain.Endpoint) (int, string) {
 	return f[ep.URLString], SlotSourceDiscovered
 }
 
+func (fixedSlots) ModelSlots(*domain.Endpoint, string) (int, bool) { return 0, false }
+func (fixedSlots) ModelSlotList(*domain.Endpoint) map[string]int   { return nil }
+
 func TestQueue_WakeAfterCapacityGrows(t *testing.T) {
 	slots := fixedSlots{"http://a:1": 1}
 	q := NewQueueWrapper(NewRoundRobinSelector(NewTestStatsCollector()), defaultQueueConfig(), slots)
@@ -296,7 +299,7 @@ func TestQueue_WakeAfterCapacityGrows(t *testing.T) {
 	slots["http://a:1"] = 2
 	q.mu.Unlock()
 	q.Wake()
-	if r := mustReceive(t, ch); r.endpoint != a {
+	if r := mustReceive(t, ch); r.endpoint == nil || r.endpoint.URLString != a.URLString {
 		t.Fatalf("waiter: %+v", r)
 	}
 }
@@ -406,5 +409,150 @@ func TestQueue_StatsListsWaitersWithCallerAndPin(t *testing.T) {
 	mustReceive(t, second)
 	if s := q.Stats(); s.WaitsCompleted != 2 || s.WaitTotalMs <= 0 || len(s.Waiting) != 0 {
 		t.Fatalf("counters after drain: %+v", s)
+	}
+}
+
+// modelSlots is a resolver with an endpoint-wide limit plus per-model limits,
+// like a llama-swap node running several models.
+type modelSlots struct {
+	models   map[string]int
+	endpoint int
+}
+
+func (m modelSlots) Slots(*domain.Endpoint) (int, string) { return m.endpoint, SlotSourceDiscovered }
+func (m modelSlots) ModelSlots(_ *domain.Endpoint, model string) (int, bool) {
+	n, ok := m.models[model]
+	return n, ok
+}
+func (m modelSlots) ModelSlotList(*domain.Endpoint) map[string]int { return m.models }
+
+func modelCtx(model string) context.Context {
+	return context.WithValue(context.Background(), constants.ContextModelKey, model)
+}
+
+func TestQueue_PerModelLimitHoldsWhileEndpointHasRoom(t *testing.T) {
+	res := modelSlots{endpoint: 5, models: map[string]int{"qwen": 1, "llama": 3}}
+	q := NewQueueWrapper(NewRoundRobinSelector(NewTestStatsCollector()), defaultQueueConfig(), res)
+	t.Cleanup(q.Stop)
+	node := makeEndpoint("node", "http://node:1")
+	eps := []*domain.Endpoint{node}
+
+	first, err := q.Select(modelCtx("qwen"), eps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The node has 4 endpoint slots left, but qwen's own single slot is taken.
+	second := selectAsync(modelCtx("qwen"), q, eps)
+	waitForDepth(t, q, 1)
+
+	// Another model on the same node is not held up by qwen being full.
+	for range 3 {
+		if _, err := q.Select(modelCtx("llama"), eps); err != nil {
+			t.Fatalf("llama should be admitted: %v", err)
+		}
+	}
+	// A model the node has not loaded has no limit of its own; the endpoint
+	// limit (5) still applies and is now reached: 1 qwen + 3 llama + this one.
+	if _, err := q.Select(modelCtx("gemma"), eps); err != nil {
+		t.Fatalf("unloaded model should be bounded only by the endpoint: %v", err)
+	}
+
+	s := q.Stats()
+	got := map[string]QueueModelStats{}
+	for _, m := range s.Endpoints[0].Models {
+		got[m.Model] = m
+	}
+	if got["qwen"].InUse != 1 || got["qwen"].Slots != 1 || got["llama"].InUse != 3 || got["gemma"].InUse != 1 || got["gemma"].Slots != 0 {
+		t.Fatalf("model stats: %+v", s.Endpoints[0].Models)
+	}
+
+	// Releasing qwen's slot dispatches the waiting qwen request.
+	q.DecrementConnections(first)
+	if r := mustReceive(t, second); r.err != nil {
+		t.Fatalf("queued qwen request: %+v", r)
+	}
+}
+
+func TestQueue_ModelResolverAppliesPerEndpoint(t *testing.T) {
+	res := modelSlots{endpoint: 4, models: map[string]int{"qwen3:8b-native": 1}}
+	q := NewQueueWrapper(NewRoundRobinSelector(NewTestStatsCollector()), defaultQueueConfig(), res)
+	t.Cleanup(q.Stop)
+	// An alias resolves to a backend-specific name; the per-model limit must
+	// be looked up under that name, not the alias the client sent.
+	q.SetModelResolver(func(context.Context, *domain.Endpoint) string { return "qwen3:8b-native" })
+	node := makeEndpoint("node", "http://node:1")
+	eps := []*domain.Endpoint{node}
+
+	if _, err := q.Select(modelCtx("my-alias"), eps); err != nil {
+		t.Fatal(err)
+	}
+	ch := selectAsync(modelCtx("my-alias"), q, eps)
+	waitForDepth(t, q, 1)
+	q.Stop()
+	mustReceive(t, ch)
+}
+
+func TestQueue_ReleaseWithForeignPointerKeepsModelCountsRight(t *testing.T) {
+	res := modelSlots{endpoint: 2, models: map[string]int{"qwen": 1}}
+	q := NewQueueWrapper(NewRoundRobinSelector(NewTestStatsCollector()), defaultQueueConfig(), res)
+	t.Cleanup(q.Stop)
+	node := makeEndpoint("node", "http://node:1")
+	eps := []*domain.Endpoint{node}
+
+	if _, err := q.Select(modelCtx("qwen"), eps); err != nil {
+		t.Fatal(err)
+	}
+	// Release with the caller's own pointer, not the copy Select returned.
+	q.DecrementConnections(node)
+	if s := q.Stats(); s.Endpoints[0].InUse != 0 || s.Endpoints[0].Models[0].InUse != 0 {
+		t.Fatalf("slot not released: %+v", s.Endpoints[0])
+	}
+	if _, err := q.Select(modelCtx("qwen"), eps); err != nil {
+		t.Fatalf("qwen slot should be free again: %v", err)
+	}
+}
+
+func TestQueue_StressPerModelNeverExceedsSlots(t *testing.T) {
+	res := modelSlots{endpoint: 4, models: map[string]int{"a": 1, "b": 2}}
+	cfg := defaultQueueConfig()
+	cfg.MaxSize, cfg.Timeout = 1000, 5*time.Second
+	q := NewQueueWrapper(NewRoundRobinSelector(NewTestStatsCollector()), cfg, res)
+	t.Cleanup(q.Stop)
+	node := makeEndpoint("node", "http://node:1")
+	eps := []*domain.Endpoint{node}
+
+	var total atomic.Int64
+	perModel := map[string]*atomic.Int64{"a": {}, "b": {}, "c": {}}
+	var wg sync.WaitGroup
+	for i := range 150 {
+		model := []string{"a", "b", "c"}[i%3]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ep, err := q.Select(modelCtx(model), eps)
+			if err != nil {
+				return
+			}
+			if n := total.Add(1); n > 4 {
+				t.Errorf("endpoint exceeded its 4 slots: %d", n)
+			}
+			if n := perModel[model].Add(1); model != "c" && n > int64(res.models[model]) {
+				t.Errorf("model %s exceeded its %d slots: %d", model, res.models[model], n)
+			}
+			time.Sleep(200 * time.Microsecond)
+			perModel[model].Add(-1)
+			total.Add(-1)
+			q.DecrementConnections(ep)
+		}()
+	}
+	wg.Wait()
+	s := q.Stats()
+	for _, m := range s.Endpoints[0].Models {
+		if m.InUse != 0 {
+			t.Fatalf("model slot leaked: %+v", m)
+		}
+	}
+	if s.Endpoints[0].InUse != 0 || s.Depth != 0 {
+		t.Fatalf("not drained: %+v", s)
 	}
 }

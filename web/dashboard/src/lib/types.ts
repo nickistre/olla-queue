@@ -244,12 +244,21 @@ export interface ProcessStatsResponse {
 
 // /internal/stats/queue. {"enabled":false} when the queue is off, so every
 // other field is optional on the wire; parseQueue fills in safe defaults.
+// One model's slot use on an endpoint. slots is 0 when the backend reported no
+// limit for the model; it is then bounded only by the endpoint's limit.
+export interface QueueModelStats {
+  model: string;
+  slots: number;
+  in_use: number;
+}
+
 export interface QueueEndpointStats {
   name: string;
   url: string;
   slot_source: string;
   slots: number;
   in_use: number;
+  models: QueueModelStats[];
 }
 
 export interface QueueWaiter {

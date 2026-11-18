@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"net/http"
 	"regexp"
@@ -35,7 +36,11 @@ var (
 // serverConfig holds static configuration set at startup.
 // Field order largest-to-smallest for alignment.
 type serverConfig struct {
-	name string
+	// modelSlots makes the mock look like llama-swap running several models:
+	// GET /running lists them as ready and GET /props?model=<id> reports each
+	// one's own total_slots.
+	modelSlots map[string]int
+	name       string
 	// teiKind is the model_type /info reports and the TEI routes enforce:
 	// teiKindEmbedding (also the zero value), teiKindReranker or teiKindClassifier.
 	teiKind string
@@ -84,8 +89,11 @@ func (srv *mockServer) handler() http.Handler {
 	// /props skips behaviour on purpose: it models llama.cpp's metadata
 	// endpoint, and slot discovery should not be slowed or failed by a fault
 	// injected for inference traffic.
-	if srv.cfg.totalSlots > 0 {
+	if srv.cfg.totalSlots > 0 || len(srv.cfg.modelSlots) > 0 {
 		mux.HandleFunc("GET /props", srv.handleProps)
+	}
+	if len(srv.cfg.modelSlots) > 0 {
+		mux.HandleFunc("GET /running", srv.handleRunning)
 	}
 	mux.HandleFunc("GET /health", srv.wrap(srv.handleHealth))
 	mux.HandleFunc("GET /", srv.wrap(srv.handleRoot))
@@ -1357,7 +1365,23 @@ func contextDone(ctx context.Context) <-chan struct{} {
 }
 
 // handleProps mimics llama.cpp's GET /props closely enough for slot discovery.
-func (srv *mockServer) handleProps(w http.ResponseWriter, _ *http.Request) {
+func (srv *mockServer) handleProps(w http.ResponseWriter, r *http.Request) {
+	if len(srv.cfg.modelSlots) > 0 {
+		// Multi-model, like llama-swap or llama.cpp router mode: /props needs
+		// ?model=, and a model that is not loaded is refused rather than
+		// started when autoload=false.
+		model := r.URL.Query().Get("model")
+		slots, ok := srv.cfg.modelSlots[model]
+		switch {
+		case model == "":
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "model name is missing from the request"})
+		case !ok:
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "model " + model + " is not loaded"})
+		default:
+			writeJSON(w, http.StatusOK, map[string]any{"total_slots": slots, "model_path": model, "is_sleeping": false})
+		}
+		return
+	}
 	model := ""
 	if len(srv.cfg.models) > 0 {
 		model = srv.cfg.models[0]
@@ -1367,4 +1391,13 @@ func (srv *mockServer) handleProps(w http.ResponseWriter, _ *http.Request) {
 		"model_path":  model,
 		"is_sleeping": false,
 	})
+}
+
+// handleRunning mimics llama-swap's GET /running for the --model-slots models.
+func (srv *mockServer) handleRunning(w http.ResponseWriter, _ *http.Request) {
+	running := make([]map[string]string, 0, len(srv.cfg.modelSlots))
+	for _, m := range slices.Sorted(maps.Keys(srv.cfg.modelSlots)) {
+		running = append(running, map[string]string{"model": m, "state": "ready"})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"running": running})
 }

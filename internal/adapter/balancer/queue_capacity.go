@@ -25,27 +25,41 @@ const (
 
 // slotProbeTypes are endpoint types worth asking for slot counts. llama-swap
 // usually sits behind an openai-compatible entry, so those are probed too; any
-// backend without /running or /props just falls back to the default.
+// backend without /running, /props or a router /models just falls back.
 var slotProbeTypes = map[string]struct{}{
 	"llamacpp":          {},
 	"openai-compatible": {},
 	"openai":            {},
 }
 
-// SlotDiscoverer resolves endpoint concurrency limits, learning them from the
-// backends where possible:
+// discoveredSlots is what a probe learnt about one endpoint. models is nil for
+// a single-model llama.cpp server, whose slots are simply the endpoint's.
+type discoveredSlots struct {
+	models map[string]int
+	total  int // 0 = nothing usable learnt; the endpoint falls back
+}
+
+// SlotDiscoverer resolves endpoint and per-model concurrency limits, learning
+// them from the backends where possible:
 //
 //   - llama-swap: GET /running for the loaded models, then
 //     GET /props?model=<id>&autoload=false for each. autoload=false matters:
 //     without it llama-swap would start (swap in) a model just to answer us.
-//   - llama.cpp: GET /props -> total_slots, which is the --parallel value.
+//   - llama.cpp router mode (--models-dir/--models-preset): GET /models for
+//     models whose status is "loaded", then the same per-model /props call.
+//   - llama.cpp single model: GET /props -> total_slots, the --parallel value.
 //
-// Resolution order is endpoint max_concurrent, then discovered, then fallback.
+// Several models loaded on one node each have their own slots, so the node's
+// total says nothing about how many requests one model can take. Multi-model
+// discovery therefore records slots per model as well as their sum.
+//
+// Endpoint limit: max_concurrent, then the discovered total, then fallback.
+// Model limit: the discovered per-model count, when there is one.
 type SlotDiscoverer struct {
 	client     *http.Client
 	endpoints  func(ctx context.Context) ([]*domain.Endpoint, error)
 	onChange   func()
-	discovered map[string]int
+	discovered map[string]discoveredSlots
 	stopCh     chan struct{}
 	interval   time.Duration
 	fallback   int
@@ -66,7 +80,7 @@ func NewSlotDiscoverer(endpoints func(ctx context.Context) ([]*domain.Endpoint, 
 		onChange:   onChange,
 		fallback:   fallback,
 		interval:   interval,
-		discovered: make(map[string]int),
+		discovered: make(map[string]discoveredSlots),
 		stopCh:     make(chan struct{}),
 	}
 }
@@ -79,18 +93,43 @@ func (d *SlotDiscoverer) SetOnChange(fn func()) {
 	d.mu.Unlock()
 }
 
-// Slots implements SlotResolver.
+// Slots implements SlotResolver: the endpoint-wide limit.
 func (d *SlotDiscoverer) Slots(ep *domain.Endpoint) (int, string) {
 	if ep.MaxConcurrent > 0 {
 		return ep.MaxConcurrent, SlotSourceConfig
 	}
 	d.mu.RLock()
-	n, ok := d.discovered[ep.URLString]
+	ds, ok := d.discovered[ep.URLString]
 	d.mu.RUnlock()
-	if ok {
-		return n, SlotSourceDiscovered
+	if ok && ds.total > 0 {
+		return ds.total, SlotSourceDiscovered
 	}
 	return d.fallback, SlotSourceDefault
+}
+
+// ModelSlots implements SlotResolver: the limit for one model on ep, if the
+// backend reported one. A model that is not loaded has no limit of its own;
+// the endpoint limit still applies, and loading it is the backend's call.
+func (d *SlotDiscoverer) ModelSlots(ep *domain.Endpoint, model string) (int, bool) {
+	if model == "" {
+		return 0, false
+	}
+	d.mu.RLock()
+	n, ok := d.discovered[ep.URLString].models[model]
+	d.mu.RUnlock()
+	return n, ok
+}
+
+// ModelSlotList implements SlotResolver for the stats view.
+func (d *SlotDiscoverer) ModelSlotList(ep *domain.Endpoint) map[string]int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	models := d.discovered[ep.URLString].models
+	out := make(map[string]int, len(models))
+	for m, n := range models {
+		out[m] = n
+	}
+	return out
 }
 
 // Start probes once immediately, then on every interval until Stop.
@@ -117,6 +156,8 @@ func (d *SlotDiscoverer) Stop() {
 
 // Refresh probes every eligible endpoint once. Failed probes keep the last
 // known value: a transient error shouldn't collapse a 4-slot backend to 1.
+// Endpoints with max_concurrent are still probed, because their per-model
+// limits are discovered even when config sets the endpoint-wide one.
 func (d *SlotDiscoverer) Refresh(ctx context.Context) {
 	eps, err := d.endpoints(ctx)
 	if err != nil {
@@ -126,22 +167,19 @@ func (d *SlotDiscoverer) Refresh(ctx context.Context) {
 
 	changed := false
 	for _, ep := range eps {
-		if ep.MaxConcurrent > 0 {
-			continue
-		}
 		if _, ok := slotProbeTypes[ep.Type]; !ok {
 			continue
 		}
-		slots, err := d.probe(ctx, ep)
+		found, err := d.probe(ctx, ep)
 		if err != nil {
 			slog.Debug("slot discovery: probe failed", "endpoint", ep.Name, "error", err)
 			continue
 		}
 		d.mu.Lock()
-		if d.discovered[ep.URLString] != slots {
-			d.discovered[ep.URLString] = slots
+		if !sameSlots(d.discovered[ep.URLString], found) {
+			d.discovered[ep.URLString] = found
 			changed = true
-			slog.Info("Discovered endpoint slots", "endpoint", ep.Name, "slots", slots)
+			slog.Info("Discovered endpoint slots", "endpoint", ep.Name, "slots", found.total, "models", found.models)
 		}
 		d.mu.Unlock()
 	}
@@ -154,42 +192,78 @@ func (d *SlotDiscoverer) Refresh(ctx context.Context) {
 	}
 }
 
-func (d *SlotDiscoverer) probe(ctx context.Context, ep *domain.Endpoint) (int, error) {
-	if body, status, err := d.get(ctx, ep, "/running"); err == nil && status == http.StatusOK && gjson.GetBytes(body, "running").IsArray() {
-		return d.probeLlamaSwap(ctx, ep, body)
+func sameSlots(a, b discoveredSlots) bool {
+	if a.total != b.total || len(a.models) != len(b.models) || (a.models == nil) != (b.models == nil) {
+		return false
 	}
-
-	body, status, err := d.get(ctx, ep, "/props")
-	if err != nil {
-		return 0, err
+	for m, n := range a.models {
+		if bn, ok := b.models[m]; !ok || bn != n {
+			return false
+		}
 	}
-	if status != http.StatusOK {
-		return 0, fmt.Errorf("/props returned %d", status)
-	}
-	return totalSlots(body)
+	return true
 }
 
-// probeLlamaSwap sums total_slots across ready models. Capacity is per endpoint
-// in this version, so concurrently loaded models share one pool.
-func (d *SlotDiscoverer) probeLlamaSwap(ctx context.Context, ep *domain.Endpoint, running []byte) (int, error) {
-	sum := 0
-	for _, m := range gjson.GetBytes(running, "running").Array() {
-		model := m.Get("model").String()
-		if model == "" || m.Get("state").String() != "ready" {
-			continue
+func (d *SlotDiscoverer) probe(ctx context.Context, ep *domain.Endpoint) (discoveredSlots, error) {
+	// llama-swap: /running lists processes with a state.
+	if body, status, err := d.get(ctx, ep, "/running"); err == nil && status == http.StatusOK && gjson.GetBytes(body, "running").IsArray() {
+		var loaded []string
+		for _, m := range gjson.GetBytes(body, "running").Array() {
+			if id := m.Get("model").String(); id != "" && m.Get("state").String() == "ready" {
+				loaded = append(loaded, id)
+			}
 		}
+		return d.probeModels(ctx, ep, loaded), nil
+	}
+
+	// Single-model llama.cpp answers /props directly. Router mode refuses
+	// /props without ?model= (400), which sends us to /models below.
+	body, status, err := d.get(ctx, ep, "/props")
+	if err != nil {
+		return discoveredSlots{}, err
+	}
+	if status == http.StatusOK {
+		n, slotsErr := totalSlots(body)
+		if slotsErr != nil {
+			return discoveredSlots{}, slotsErr
+		}
+		return discoveredSlots{total: n}, nil
+	}
+
+	// llama.cpp router mode: /models carries a per-model status. A plain
+	// OpenAI /models listing has no status, so it never counts as a router.
+	body, status, err = d.get(ctx, ep, "/models")
+	if err != nil {
+		return discoveredSlots{}, err
+	}
+	if status != http.StatusOK || !gjson.GetBytes(body, "data.#.status").IsArray() || len(gjson.GetBytes(body, "data.#.status").Array()) == 0 {
+		return discoveredSlots{}, fmt.Errorf("/props returned %d and /models is not a llama.cpp router listing", status)
+	}
+	var loaded []string
+	for _, m := range gjson.GetBytes(body, "data").Array() {
+		if id := m.Get("id").String(); id != "" && m.Get("status.value").String() == "loaded" {
+			loaded = append(loaded, id)
+		}
+	}
+	return d.probeModels(ctx, ep, loaded), nil
+}
+
+// probeModels reads total_slots for each loaded model. A multi-model node with
+// nothing loaded is a valid answer (models empty, total 0): the endpoint then
+// falls back to the default limit rather than keeping stale per-model limits.
+func (d *SlotDiscoverer) probeModels(ctx context.Context, ep *domain.Endpoint, loaded []string) discoveredSlots {
+	found := discoveredSlots{models: make(map[string]int, len(loaded))}
+	for _, model := range loaded {
 		body, status, err := d.get(ctx, ep, "/props?autoload=false&model="+url.QueryEscape(model))
 		if err != nil || status != http.StatusOK {
 			continue
 		}
 		if n, err := totalSlots(body); err == nil {
-			sum += n
+			found.models[model] = n
+			found.total += n
 		}
 	}
-	if sum == 0 {
-		return 0, errors.New("llama-swap reported no ready models with slots")
-	}
-	return sum, nil
+	return found
 }
 
 func totalSlots(body []byte) (int, error) {

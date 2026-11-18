@@ -1203,3 +1203,44 @@ func TestMockStatsPeakInFlight(t *testing.T) {
 		t.Fatalf("want peak %d and nothing in flight, got %+v", concurrent, stats)
 	}
 }
+
+func TestModelSlotsActsLikeLlamaSwap(t *testing.T) {
+	t.Parallel()
+	srv := newServer(serverConfig{name: "swap", models: []string{"qwen", "llama"}, modelSlots: map[string]int{"qwen": 2, "llama": 3}})
+	ts := httptest.NewServer(srv.handler())
+	t.Cleanup(ts.Close)
+
+	var running struct {
+		Running []struct{ Model, State string } `json:"running"`
+	}
+	runResp := getURL(t, ts.URL+"/running")
+	defer runResp.Body.Close()
+	decodeJSON(t, runResp, &running)
+	if len(running.Running) != 2 || running.Running[0].Model != "llama" || running.Running[0].State != "ready" {
+		t.Fatalf("/running = %+v", running)
+	}
+
+	var props struct {
+		TotalSlots int `json:"total_slots"`
+	}
+	qwenResp := getURL(t, ts.URL+"/props?model=qwen&autoload=false")
+	defer qwenResp.Body.Close()
+	decodeJSON(t, qwenResp, &props)
+	if props.TotalSlots != 2 {
+		t.Fatalf("qwen total_slots = %d, want 2", props.TotalSlots)
+	}
+	for path, want := range map[string]int{"/props": http.StatusBadRequest, "/props?model=gemma": http.StatusConflict} {
+		resp := getURL(t, ts.URL+path)
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Errorf("%s status = %d, want %d", path, resp.StatusCode, want)
+		}
+	}
+}
+
+func TestParseModelSlots(t *testing.T) {
+	got := parseModelSlots(" qwen=2, llama=3,bad,zero=0,=4")
+	if len(got) != 2 || got["qwen"] != 2 || got["llama"] != 3 {
+		t.Fatalf("parseModelSlots = %v", got)
+	}
+}

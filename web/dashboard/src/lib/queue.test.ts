@@ -128,6 +128,11 @@ describe('parseQueue', () => {
       endpoints: null,
     });
     expect(q?.waiting[0].client_ip).toBe('1.2.3.4');
+    expect(parseQueue({ enabled: true, endpoints: [{ name: 'n', slots: 2 }] })?.endpoints[0].models).toEqual([]);
+    expect(
+      parseQueue({ enabled: true, endpoints: [{ name: 'n', models: [{ model: 'q', slots: 2, in_use: 1 }] }] })
+        ?.endpoints[0].models[0],
+    ).toEqual({ model: 'q', slots: 2, in_use: 1 });
     expect(q?.waiting[0].sticky_endpoint).toBe('');
     expect(q?.endpoints).toEqual([]);
   });

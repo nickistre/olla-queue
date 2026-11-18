@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,9 +35,14 @@ const (
 	SlotSourceDefault    = "default"
 )
 
-// SlotResolver reports the concurrency limit for an endpoint and where it came from.
+// SlotResolver reports concurrency limits. Slots is the endpoint-wide limit and
+// where it came from; ModelSlots is one model's own limit on that endpoint,
+// when the backend reports one (several models loaded on a node each have
+// their own slots, so the node total cannot stand in for any one of them).
 type SlotResolver interface {
 	Slots(ep *domain.Endpoint) (slots int, source string)
+	ModelSlots(ep *domain.Endpoint, model string) (slots int, known bool)
+	ModelSlotList(ep *domain.Endpoint) map[string]int
 }
 
 // staticSlots resolves from endpoint config only, falling back to a fixed default.
@@ -48,6 +54,20 @@ func (s staticSlots) Slots(ep *domain.Endpoint) (int, string) {
 	}
 	return s.fallback, SlotSourceDefault
 }
+
+func (staticSlots) ModelSlots(*domain.Endpoint, string) (int, bool) { return 0, false }
+func (staticSlots) ModelSlotList(*domain.Endpoint) map[string]int   { return nil }
+
+// reservation records which endpoint and model a Select claimed, so the
+// matching DecrementConnections releases the right per-model slot.
+type reservation struct {
+	url   string
+	model string
+}
+
+// modelKey joins endpoint and model for the per-model counters. NUL cannot
+// appear in a URL or a model name, so keys cannot collide.
+func modelKey(url, model string) string { return url + "\x00" + model }
 
 type queueResult struct {
 	endpoint *domain.Endpoint
@@ -79,13 +99,21 @@ type QueueWrapper struct {
 	// pinLookup maps sticky keys to pinned endpoint URLs for the stats
 	// listing. Optional: nil when sticky sessions are off.
 	pinLookup func(keys []string) map[string]string
-	inUse     map[string]int
-	known     map[string]*domain.Endpoint
-	waiters   list.List
-	cfg       config.QueueConfig
-	stats     queueCounters
-	mu        sync.Mutex
-	closed    bool
+	// modelOf names the model a request will run on ep. Aliases can map one
+	// requested name to different backend names per endpoint, so it is per
+	// endpoint. Defaults to the requested model from the context.
+	modelOf    func(ctx context.Context, ep *domain.Endpoint) string
+	inUse      map[string]int
+	modelInUse map[string]int
+	// reservations is keyed by the endpoint copy Select hands out, which is
+	// unique per request; see reserveLocked.
+	reservations map[*domain.Endpoint]reservation
+	known        map[string]*domain.Endpoint
+	waiters      list.List
+	cfg          config.QueueConfig
+	stats        queueCounters
+	mu           sync.Mutex
+	closed       bool
 }
 
 type queueCounters struct {
@@ -113,12 +141,29 @@ func NewQueueWrapper(inner domain.EndpointSelector, cfg config.QueueConfig, reso
 		resolver = staticSlots{fallback: cfg.DefaultSlots}
 	}
 	return &QueueWrapper{
-		inner:    inner,
-		resolver: resolver,
-		cfg:      cfg,
-		inUse:    make(map[string]int),
-		known:    make(map[string]*domain.Endpoint),
+		inner:        inner,
+		resolver:     resolver,
+		cfg:          cfg,
+		inUse:        make(map[string]int),
+		modelInUse:   make(map[string]int),
+		reservations: make(map[*domain.Endpoint]reservation),
+		known:        make(map[string]*domain.Endpoint),
+		modelOf:      requestedModel,
 	}
+}
+
+// requestedModel is the default modelOf: the model the client asked for.
+func requestedModel(ctx context.Context, _ *domain.Endpoint) string {
+	m, _ := ctx.Value(constants.ContextModelKey).(string)
+	return m
+}
+
+// SetModelResolver replaces how the model for a request on an endpoint is
+// named, e.g. to apply alias and canonical-name resolution.
+func (q *QueueWrapper) SetModelResolver(fn func(ctx context.Context, ep *domain.Endpoint) string) {
+	q.mu.Lock()
+	q.modelOf = fn
+	q.mu.Unlock()
 }
 
 // Name composes the inner balancer name.
@@ -138,7 +183,7 @@ func (q *QueueWrapper) DecrementConnections(endpoint *domain.Endpoint) {
 	q.inner.DecrementConnections(endpoint)
 
 	q.mu.Lock()
-	q.releaseLocked(endpoint.URLString)
+	q.releaseLocked(endpoint)
 	q.dispatchLocked()
 	q.mu.Unlock()
 }
@@ -160,7 +205,7 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 
 	// Taking a free slot straight away is always fair: every dispatch pass leaves
 	// no waiter with a free candidate, so any slot free now is one no waiter can use.
-	if free := q.freeLocked(endpoints); len(free) > 0 {
+	if free := q.freeLocked(ctx, endpoints); len(free) > 0 {
 		ep, err := q.reserveLocked(ctx, free)
 		q.mu.Unlock()
 		return ep, err
@@ -229,7 +274,7 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 	res := <-w.ready
 	if res.err == nil && ctx.Err() != nil {
 		q.mu.Lock()
-		q.releaseLocked(res.endpoint.URLString)
+		q.releaseLocked(res.endpoint)
 		q.dispatchLocked()
 		q.mu.Unlock()
 		q.stats.cancelled.Add(1)
@@ -325,7 +370,7 @@ func (q *QueueWrapper) dispatchLocked() {
 	for e := q.waiters.Front(); e != nil; {
 		next := e.Next()
 		w := waiterAt(e)
-		if free := q.freeLocked(w.candidates); len(free) > 0 {
+		if free := q.freeLocked(w.ctx, w.candidates); len(free) > 0 {
 			ep, err := q.reserveLocked(w.ctx, free)
 			q.completeLocked(w, queueResult{endpoint: ep, err: err})
 		}
@@ -339,34 +384,77 @@ func (q *QueueWrapper) completeLocked(w *queueWaiter, res queueResult) {
 	w.ready <- res
 }
 
-// reserveLocked lets the inner strategy pick among free endpoints, then claims a slot.
+// reserveLocked lets the inner strategy pick among free endpoints, then claims
+// a slot on the endpoint and on the model. It returns a copy of the endpoint:
+// the copy's pointer is unique to this request, so DecrementConnections can
+// find exactly which model slot to release even if callers share endpoint
+// pointers. The proxy path identifies endpoints by name and URL, never by
+// pointer, so the copy is otherwise indistinguishable.
 func (q *QueueWrapper) reserveLocked(ctx context.Context, free []*domain.Endpoint) (*domain.Endpoint, error) {
 	ep, err := q.inner.Select(ctx, free)
 	if err != nil {
 		return nil, err
 	}
-	q.inUse[ep.URLString]++
-	return ep, nil
+	res := reservation{url: ep.URLString, model: q.modelOf(ctx, ep)}
+	q.inUse[res.url]++
+	if res.model != "" {
+		q.modelInUse[modelKey(res.url, res.model)]++
+	}
+	claimed := *ep
+	q.reservations[&claimed] = res
+	return &claimed, nil
 }
 
-func (q *QueueWrapper) releaseLocked(url string) {
-	// Guard against a stray decrement driving the count negative and
+func (q *QueueWrapper) releaseLocked(ep *domain.Endpoint) {
+	res, ok := q.reservations[ep]
+	if ok {
+		delete(q.reservations, ep)
+	} else {
+		// Not a pointer this queue handed out. Release some reservation on
+		// the same endpoint so the per-model counts cannot drift upward.
+		res = reservation{url: ep.URLString}
+		for p, r := range q.reservations {
+			if r.url == ep.URLString {
+				res = r
+				delete(q.reservations, p)
+				break
+			}
+		}
+	}
+	// Guard against a stray decrement driving a count negative and
 	// permanently over-admitting that endpoint.
-	if q.inUse[url] > 0 {
-		q.inUse[url]--
+	if q.inUse[res.url] > 0 {
+		q.inUse[res.url]--
+	}
+	if res.model != "" {
+		k := modelKey(res.url, res.model)
+		if q.modelInUse[k] > 1 {
+			q.modelInUse[k]--
+		} else {
+			delete(q.modelInUse, k)
+		}
 	}
 }
 
-func (q *QueueWrapper) freeLocked(endpoints []*domain.Endpoint) []*domain.Endpoint {
+// freeLocked filters to endpoints that have room for this request: under the
+// endpoint-wide limit and, where the backend reported one, under the limit of
+// the model the request will run.
+func (q *QueueWrapper) freeLocked(ctx context.Context, endpoints []*domain.Endpoint) []*domain.Endpoint {
 	var free []*domain.Endpoint
 	for _, ep := range endpoints {
 		if !ep.Status.IsRoutable() {
 			continue
 		}
 		slots, _ := q.resolver.Slots(ep)
-		if q.inUse[ep.URLString] < slots {
-			free = append(free, ep)
+		if q.inUse[ep.URLString] >= slots {
+			continue
 		}
+		if model := q.modelOf(ctx, ep); model != "" {
+			if limit, known := q.resolver.ModelSlots(ep, model); known && q.modelInUse[modelKey(ep.URLString, model)] >= limit {
+				continue
+			}
+		}
+		free = append(free, ep)
 	}
 	return free
 }
@@ -378,6 +466,33 @@ func (q *QueueWrapper) anyRoutable(endpoints []*domain.Endpoint) bool {
 		}
 	}
 	return false
+}
+
+// modelStatsLocked lists every model on ep with a reported limit or a slot in
+// use, sorted by name for a stable payload.
+func (q *QueueWrapper) modelStatsLocked(ep *domain.Endpoint) []QueueModelStats {
+	byModel := make(map[string]*QueueModelStats)
+	for model, n := range q.resolver.ModelSlotList(ep) {
+		byModel[model] = &QueueModelStats{Model: model, Slots: n}
+	}
+	prefix := modelKey(ep.URLString, "")
+	for k, n := range q.modelInUse {
+		model, ok := strings.CutPrefix(k, prefix)
+		if !ok {
+			continue
+		}
+		if m, ok := byModel[model]; ok {
+			m.InUse = n
+		} else {
+			byModel[model] = &QueueModelStats{Model: model, InUse: n}
+		}
+	}
+	out := make([]QueueModelStats, 0, len(byModel))
+	for _, m := range byModel {
+		out = append(out, *m)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
+	return out
 }
 
 // waiterAt unwraps a queue element. The list only ever holds *queueWaiter.
@@ -395,13 +510,23 @@ func storeMax(v *atomic.Int64, n int64) {
 	}
 }
 
+// QueueModelStats is one model's slot use on an endpoint. Slots is 0 when the
+// backend reported no limit for the model (it is then bounded only by the
+// endpoint-wide limit).
+type QueueModelStats struct {
+	Model string `json:"model"`
+	Slots int    `json:"slots"`
+	InUse int    `json:"in_use"`
+}
+
 // QueueEndpointStats is the per-endpoint slot view.
 type QueueEndpointStats struct {
-	Name       string `json:"name"`
-	URL        string `json:"url"`
-	SlotSource string `json:"slot_source"`
-	Slots      int    `json:"slots"`
-	InUse      int    `json:"in_use"`
+	Name       string            `json:"name"`
+	URL        string            `json:"url"`
+	SlotSource string            `json:"slot_source"`
+	Models     []QueueModelStats `json:"models"`
+	Slots      int               `json:"slots"`
+	InUse      int               `json:"in_use"`
 }
 
 // QueueWaiterStats describes one request waiting in the queue.
@@ -459,6 +584,7 @@ func (q *QueueWrapper) Stats() QueueStats {
 			Slots:      slots,
 			SlotSource: source,
 			InUse:      q.inUse[url],
+			Models:     q.modelStatsLocked(ep),
 		})
 	}
 	waiting := make([]QueueWaiterStats, 0, depth)

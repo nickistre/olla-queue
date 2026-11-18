@@ -53,13 +53,25 @@
   ];
   const waitingSort: SortState = { key: 'position', dir: 'asc' };
 
-  type SlotRow = Omit<QueueEndpointStats, never> & { fill_pct: number };
+  type SlotRow = Omit<QueueEndpointStats, never> & { fill_pct: number; models_in_use: number };
   const slotRows = $derived<SlotRow[]>(
-    (data?.endpoints ?? []).map((e) => ({ ...e, fill_pct: slotFillPct(e.in_use, e.slots) })),
+    (data?.endpoints ?? []).map((e) => ({
+      ...e,
+      fill_pct: slotFillPct(e.in_use, e.slots),
+      models_in_use: e.models.reduce((n, m) => n + m.in_use, 0),
+    })),
   );
   const slotColumns: Column[] = [
     { key: 'name', label: 'Endpoint', sortable: true, sticky: true },
     { key: 'fill_pct', label: 'Slots in use', sortable: true, num: true, align: 'right' },
+    {
+      key: 'models_in_use',
+      label: 'Per model',
+      sortable: true,
+      num: true,
+      align: 'right',
+      title: 'Slots each loaded model reports for itself. A model without its own count is limited only by the endpoint',
+    },
     {
       key: 'slot_source',
       label: 'Limit from',
@@ -174,6 +186,19 @@
               <span class="glyph g-{fillCls(e)}" aria-hidden="true">●</span>
               {fmtInt(e.in_use)}<span class="unit">/ {fmtInt(e.slots)}</span>
             </td>
+            <td class={cellClass('models_in_use')}>
+              {#if e.models.length > 0}
+                <span class="model-slots">
+                  {#each e.models as m (m.model)}
+                    <span
+                      class="pill model-slot"
+                      class:is-full={m.slots > 0 && m.in_use >= m.slots}
+                      title={m.slots > 0 ? `${m.model}: ${m.in_use} of ${m.slots} slots in use` : `${m.model}: ${m.in_use} in use, no per-model limit reported`}
+                    >{m.model} <strong>{fmtInt(m.in_use)}{#if m.slots > 0}/{fmtInt(m.slots)}{/if}</strong></span>
+                  {/each}
+                </span>
+              {:else}<span class="dash">—</span>{/if}
+            </td>
             <td>{e.slot_source || '—'}</td>
           {/snippet}
         </SortableTable>
@@ -194,5 +219,15 @@
   }
   .mono {
     font-size: 0.72rem;
+  }
+  .model-slots {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    justify-content: flex-end;
+  }
+  .model-slot.is-full {
+    color: var(--amber);
+    border-color: var(--amber);
   }
 </style>
