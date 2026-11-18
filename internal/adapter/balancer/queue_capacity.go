@@ -129,16 +129,48 @@ func (d *SlotDiscoverer) Slots(ep *domain.Endpoint) (int, string) {
 }
 
 // ModelSlots implements SlotResolver: the limit for one model on ep, if the
-// backend reported one. A model that is not loaded has no limit of its own;
-// the endpoint limit still applies, and loading it is the backend's call.
+// backend reported one.
+//
+// On a multi-model node (llama-swap, router mode) a model that is not loaded
+// gets a limit of 1 until it reports ready: the first request starts the load,
+// and the rest wait in Olla's queue instead of piling up behind the load (or
+// a swap) inside the backend. Its real slot count is learnt once it is ready.
 func (d *SlotDiscoverer) ModelSlots(ep *domain.Endpoint, model string) (int, bool) {
 	if model == "" {
 		return 0, false
 	}
 	d.mu.RLock()
-	n, ok := d.discovered[ep.URLString].models[model]
+	ds := d.discovered[ep.URLString]
 	d.mu.RUnlock()
-	return n, ok
+	if n, ok := ds.models[model]; ok {
+		return n, true
+	}
+	if ds.kind == backendLlamaSwap || ds.kind == backendRouter {
+		return 1, true
+	}
+	return 0, false
+}
+
+// GroupSlots implements SlotResolver: the group's max_concurrent, else the
+// slots of its loaded models, else the fallback. Summing only loaded models is
+// what makes a swap group behave: while qwen-a holds the group's one slot, a
+// request for qwen-b sees the group full rather than the node's spare slots.
+func (d *SlotDiscoverer) GroupSlots(ep *domain.Endpoint, group string) (int, string) {
+	if g, ok := slotGroupConfig(ep, group); ok && g.MaxConcurrent > 0 {
+		return g.MaxConcurrent, SlotSourceConfig
+	}
+	d.mu.RLock()
+	sum := 0
+	for m, n := range d.discovered[ep.URLString].models {
+		if slotGroupOf(ep, m) == group {
+			sum += n
+		}
+	}
+	d.mu.RUnlock()
+	if sum > 0 {
+		return sum, SlotSourceDiscovered
+	}
+	return d.fallback, SlotSourceDefault
 }
 
 // ModelSlotList implements SlotResolver for the stats view.
@@ -188,28 +220,49 @@ func (d *SlotDiscoverer) Refresh(ctx context.Context) {
 
 	changed := false
 	for _, ep := range eps {
-		if _, ok := slotProbeTypes[ep.Type]; !ok {
-			continue
-		}
-		found, err := d.probe(ctx, ep)
-		if err != nil {
-			slog.Debug("slot discovery: probe failed", "endpoint", ep.Name, "error", err)
-			continue
-		}
-		d.mu.Lock()
-		d.lastSeen[ep.URLString] = ep
-		if !sameSlots(d.discovered[ep.URLString], found) {
-			d.discovered[ep.URLString] = found
+		if d.refreshOne(ctx, ep) {
 			changed = true
-			slog.Info("Discovered endpoint slots", "endpoint", ep.Name, "slots", found.total, "models", found.models)
 		}
-		d.mu.Unlock()
 	}
+	if changed {
+		d.notify()
+	}
+}
 
+// RefreshEndpoint re-probes one endpoint now, e.g. because llama-swap just
+// reported a model starting or stopping. The periodic Refresh would catch the
+// change too, but up to slot_refresh_interval later.
+func (d *SlotDiscoverer) RefreshEndpoint(ctx context.Context, ep *domain.Endpoint) {
+	if d.refreshOne(ctx, ep) {
+		d.notify()
+	}
+}
+
+func (d *SlotDiscoverer) refreshOne(ctx context.Context, ep *domain.Endpoint) bool {
+	if _, ok := slotProbeTypes[ep.Type]; !ok {
+		return false
+	}
+	found, err := d.probe(ctx, ep)
+	if err != nil {
+		slog.Debug("slot discovery: probe failed", "endpoint", ep.Name, "error", err)
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.lastSeen[ep.URLString] = ep
+	if sameSlots(d.discovered[ep.URLString], found) {
+		return false
+	}
+	d.discovered[ep.URLString] = found
+	slog.Info("Discovered endpoint slots", "endpoint", ep.Name, "slots", found.total, "models", found.models)
+	return true
+}
+
+func (d *SlotDiscoverer) notify() {
 	d.mu.RLock()
 	onChange := d.onChange
 	d.mu.RUnlock()
-	if changed && onChange != nil {
+	if onChange != nil {
 		onChange()
 	}
 }

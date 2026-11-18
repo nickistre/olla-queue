@@ -1676,6 +1676,26 @@ func TestQueueConfig_Validate(t *testing.T) {
 			c.Proxy.Queue.TrackExternalLoad = false
 			c.Proxy.Queue.BusyPollInterval = 0
 		}},
+		{name: "valid slot groups", modify: func(c *Config) {
+			c.Discovery.Static.Endpoints[0].SlotGroups = []SlotGroupConfig{
+				{Name: "embed", Models: []string{"nomic*"}},
+				{Name: "gpu", Models: []string{"*"}, MaxConcurrent: 1},
+			}
+		}},
+		{name: "slot group without a name", wantErr: true, modify: func(c *Config) {
+			c.Discovery.Static.Endpoints[0].SlotGroups = []SlotGroupConfig{{Models: []string{"*"}}}
+		}},
+		{name: "duplicate slot group names", wantErr: true, modify: func(c *Config) {
+			c.Discovery.Static.Endpoints[0].SlotGroups = []SlotGroupConfig{
+				{Name: "gpu", Models: []string{"a*"}}, {Name: "gpu", Models: []string{"b*"}},
+			}
+		}},
+		{name: "slot group with no models", wantErr: true, modify: func(c *Config) {
+			c.Discovery.Static.Endpoints[0].SlotGroups = []SlotGroupConfig{{Name: "gpu"}}
+		}},
+		{name: "slot group negative max_concurrent", wantErr: true, modify: func(c *Config) {
+			c.Discovery.Static.Endpoints[0].SlotGroups = []SlotGroupConfig{{Name: "gpu", Models: []string{"*"}, MaxConcurrent: -1}}
+		}},
 		{name: "invalid values ignored while disabled", modify: func(c *Config) { c.Proxy.Queue.MaxSize = 0 }},
 		{name: "negative max_concurrent", wantErr: true, modify: func(c *Config) {
 			c.Discovery.Static.Endpoints[0].MaxConcurrent = -1

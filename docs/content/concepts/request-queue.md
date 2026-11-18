@@ -54,7 +54,36 @@ Model limits are only ever discovered. Discovery applies to `llamacpp`, `openai-
 - **llama.cpp router mode** (`--models-dir` / `--models-preset`): `GET /models` lists models with a `status`. Each `loaded` one is asked for `/props?model=<id>&autoload=false` the same way.
 - **llama.cpp, single model**: `GET /props` gives `total_slots` (the server's `--parallel`). With only one model there is no separate per-model limit.
 
-`autoload=false` means a probe never loads or swaps a model. A model that isn't loaded has no limit of its own. It is bounded only by the endpoint limit, and loading it is the backend's decision.
+`autoload=false` means a probe never loads or swaps a model.
+
+On a multi-model node, a model that isn't loaded gets a limit of **1** until the backend reports it ready (the cold-model gate). The first request starts the load. Further requests wait in Olla's queue rather than piling up behind the load inside the backend. The model's real slot count is learnt as soon as it is ready.
+
+On llama-swap, a model starting, finishing its load or stopping triggers re-discovery of that node about half a second after its events settle. Olla's view of what's loaded therefore follows a swap almost immediately, rather than waiting up to `slot_refresh_interval`.
+
+### Slot groups
+
+On one node, some models may share a resource while others don't. On a llama-swap node, for example, GPU models swap in and out of one GPU, while an embedding model runs from system RAM alongside them. The node's total slots then overstate what a GPU model can use. While `qwen3.6` holds the GPU's one slot, a request for `qwen3.8` sees four free embedding slots and would be sent along, forcing a swap under the running request.
+
+`slot_groups` splits an endpoint's models into separate pools, each acting like its own node:
+
+```yaml
+discovery:
+  static:
+    endpoints:
+      - name: taki
+        url: http://taki:8080
+        type: openai-compatible
+        slot_groups:
+          - name: taki-embeddings
+            models: ["nomic-embed-*"]
+          - name: taki-gpu
+            models: ["*"]          # everything else
+            max_concurrent: 1      # optional
+```
+
+- A model joins the **first** group with a matching pattern (`*` wildcard, case-insensitive). Models in no group are only bounded by the endpoint and their own model limit.
+- A group's limit is its `max_concurrent`, else the slots of its **currently loaded** models, else `default_slots`. Counting only loaded models is what makes a swap group work: with `qwen3.6` (1 slot) loaded, `taki-gpu` has 1 slot, and a `qwen3.8` request waits until `qwen3.6` is idle. Then llama-swap swaps, as intended.
+- A request needs room in its endpoint, its group and its model. Traffic from other clients counts against the group too.
 
 The model name is the one the backend serves. If an [alias](model-aliases.md) maps to different names on different endpoints, each endpoint's limit is looked up under its own name.
 
@@ -75,7 +104,7 @@ Olla takes the backend's count of running requests and subtracts its own at that
 
 If a reading isn't available, the outside count is cleared and Olla counts only its own traffic. That covers a dropped llama-swap feed and a llama-server started with `--no-slots`. Olla never blocks on stale data.
 
-The Queue tab shows outside traffic as a blue `+N` next to Olla's own count, per endpoint and per model.
+The Queue tab shows outside traffic as a blue `+N` next to Olla's own count, per endpoint, slot group and model.
 
 ## When a request can't be served
 

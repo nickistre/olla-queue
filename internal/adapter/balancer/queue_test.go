@@ -280,8 +280,9 @@ func (f fixedSlots) Slots(ep *domain.Endpoint) (int, string) {
 	return f[ep.URLString], SlotSourceDiscovered
 }
 
-func (fixedSlots) ModelSlots(*domain.Endpoint, string) (int, bool) { return 0, false }
-func (fixedSlots) ModelSlotList(*domain.Endpoint) map[string]int   { return nil }
+func (fixedSlots) ModelSlots(*domain.Endpoint, string) (int, bool)   { return 0, false }
+func (fixedSlots) ModelSlotList(*domain.Endpoint) map[string]int     { return nil }
+func (fixedSlots) GroupSlots(*domain.Endpoint, string) (int, string) { return 1, SlotSourceDefault }
 
 func TestQueue_WakeAfterCapacityGrows(t *testing.T) {
 	slots := fixedSlots{"http://a:1": 1}
@@ -416,6 +417,7 @@ func TestQueue_StatsListsWaitersWithCallerAndPin(t *testing.T) {
 // like a llama-swap node running several models.
 type modelSlots struct {
 	models   map[string]int
+	groups   map[string]int
 	endpoint int
 }
 
@@ -425,6 +427,12 @@ func (m modelSlots) ModelSlots(_ *domain.Endpoint, model string) (int, bool) {
 	return n, ok
 }
 func (m modelSlots) ModelSlotList(*domain.Endpoint) map[string]int { return m.models }
+func (m modelSlots) GroupSlots(_ *domain.Endpoint, group string) (int, string) {
+	if n, ok := m.groups[group]; ok {
+		return n, SlotSourceConfig
+	}
+	return 1, SlotSourceDefault
+}
 
 func modelCtx(model string) context.Context {
 	return context.WithValue(context.Background(), constants.ContextModelKey, model)

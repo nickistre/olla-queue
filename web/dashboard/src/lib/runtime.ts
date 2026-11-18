@@ -3,6 +3,7 @@
 import type {
   ProcessStatsResponse,
   QueueEndpointStats,
+  QueueGroupStats,
   QueueModelStats,
   QueueStatsResponse,
   QueueWaiter,
@@ -192,6 +193,17 @@ export const parseQueue = guarded((raw: unknown): QueueStatsResponse | null => {
           slots: num(m.slots),
           in_use: num(m.in_use),
           external: num(m.external),
+        }),
+      ),
+    groups: arr(e.groups)
+      .filter(isObj)
+      .map(
+        (g): QueueGroupStats => ({
+          name: str(g.name),
+          slot_source: str(g.slot_source),
+          slots: num(g.slots),
+          in_use: num(g.in_use),
+          external: num(g.external),
         }),
       ),
   }));

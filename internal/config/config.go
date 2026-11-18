@@ -567,6 +567,9 @@ func (c *Config) validateQueue() error {
 		if ep.MaxConcurrent < 0 {
 			return fmt.Errorf("endpoint %q max_concurrent must be >= 0 (0 = automatic), got %d", ep.Name, ep.MaxConcurrent)
 		}
+		if err := validateSlotGroups(ep); err != nil {
+			return err
+		}
 	}
 
 	q := c.Proxy.Queue
@@ -587,6 +590,26 @@ func (c *Config) validateQueue() error {
 	}
 	if q.TrackExternalLoad && q.BusyPollInterval <= 0 {
 		return errors.New("proxy.queue.busy_poll_interval must be > 0 when track_external_load is enabled (prevents ticker panic)")
+	}
+	return nil
+}
+
+func validateSlotGroups(ep EndpointConfig) error {
+	seen := make(map[string]struct{}, len(ep.SlotGroups))
+	for i, g := range ep.SlotGroups {
+		if g.Name == "" {
+			return fmt.Errorf("endpoint %q slot_groups[%d] needs a name", ep.Name, i)
+		}
+		if _, dup := seen[g.Name]; dup {
+			return fmt.Errorf("endpoint %q has two slot_groups named %q", ep.Name, g.Name)
+		}
+		seen[g.Name] = struct{}{}
+		if len(g.Models) == 0 {
+			return fmt.Errorf("endpoint %q slot group %q lists no models", ep.Name, g.Name)
+		}
+		if g.MaxConcurrent < 0 {
+			return fmt.Errorf("endpoint %q slot group %q max_concurrent must be >= 0 (0 = automatic), got %d", ep.Name, g.Name, g.MaxConcurrent)
+		}
 	}
 	return nil
 }

@@ -332,3 +332,126 @@ func TestQueue_ObserveBusyListsEndpointBeforeAnyRouting(t *testing.T) {
 		t.Fatalf("endpoints = %+v", s.Endpoints)
 	}
 }
+
+func TestBusyTracker_ModelStatusTriggersRediscovery(t *testing.T) {
+	var mu sync.Mutex
+	running := `{"running":[{"model":"qwen-a","state":"ready"}]}`
+	events := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/running":
+			mu.Lock()
+			body := running
+			mu.Unlock()
+			_, _ = w.Write([]byte(body))
+		case "/props":
+			_, _ = w.Write([]byte(`{"total_slots": 1}`))
+		case "/api/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			for {
+				select {
+				case msg := <-events:
+					fmt.Fprintf(w, "event:message\ndata:%s\n\n", msg)
+					flusher.Flush()
+				case <-r.Context().Done():
+					return
+				}
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	ep := probeEndpoint("taki", "openai-compatible", srv.URL)
+	disc := NewSlotDiscoverer(staticEndpoints(ep), 1, time.Hour, nil)
+	disc.Refresh(context.Background())
+	if _, ok := disc.ModelSlotList(ep)["qwen-a"]; !ok {
+		t.Fatal("setup: qwen-a should be discovered")
+	}
+
+	var s sink
+	bt := NewBusyTracker(disc, s.observe, 20*time.Millisecond)
+	bt.Start()
+	defer bt.Stop()
+
+	// llama-swap swaps qwen-a out for qwen-b. The hourly refresh would miss
+	// it; the modelStatus burst must trigger a re-probe straight away.
+	mu.Lock()
+	running = `{"running":[{"model":"qwen-b","state":"ready"}]}`
+	mu.Unlock()
+	for range 3 {
+		events <- `{"type":"modelStatus","data":"[]"}`
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		list := disc.ModelSlotList(ep)
+		if _, b := list["qwen-b"]; b {
+			if _, a := list["qwen-a"]; !a {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("swap not picked up: %v", disc.ModelSlotList(ep))
+}
+
+func TestQueue_SlotGroupKeepsSwapModelsInOnePool(t *testing.T) {
+	// taki: GPU models share one swap slot; embeddings have their own pool.
+	res := modelSlots{endpoint: 5, models: map[string]int{"qwen3.6": 1, "nomic": 4, "qwen3.8": 1}, groups: map[string]int{"gpu": 1, "embed": 4}}
+	q := NewQueueWrapper(NewRoundRobinSelector(NewTestStatsCollector()), defaultQueueConfig(), res)
+	t.Cleanup(q.Stop)
+	node := makeEndpoint("taki", "http://taki:8080")
+	node.SlotGroups = []domain.SlotGroup{
+		{Name: "embed", Models: []string{"nomic*"}},
+		{Name: "gpu", Models: []string{"*"}},
+	}
+	eps := []*domain.Endpoint{node}
+
+	running, err := q.Select(modelCtx("qwen3.6"), eps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A request for the other GPU model would swap qwen3.6 out mid-request;
+	// it must wait for the GPU group even though the node has 4 spare slots.
+	swap := selectAsync(modelCtx("qwen3.8"), q, eps)
+	waitForDepth(t, q, 1)
+	// Embeddings live in their own group and go straight through.
+	if _, err := q.Select(modelCtx("nomic"), eps); err != nil {
+		t.Fatalf("embedding request should be admitted: %v", err)
+	}
+
+	got := map[string]QueueGroupStats{}
+	for _, g := range q.Stats().Endpoints[0].Groups {
+		got[g.Name] = g
+	}
+	if got["gpu"].InUse != 1 || got["gpu"].Slots != 1 || got["embed"].InUse != 1 {
+		t.Fatalf("group stats: %+v", got)
+	}
+
+	q.DecrementConnections(running)
+	if r := mustReceive(t, swap); r.err != nil {
+		t.Fatalf("qwen3.8 should run once the GPU group frees: %+v", r)
+	}
+}
+
+func TestQueue_SlotGroupCountsOutsideTraffic(t *testing.T) {
+	res := modelSlots{endpoint: 5, models: map[string]int{"qwen3.6": 1, "qwen3.8": 1}, groups: map[string]int{"gpu": 1}}
+	q := NewQueueWrapper(NewRoundRobinSelector(NewTestStatsCollector()), defaultQueueConfig(), res)
+	t.Cleanup(q.Stop)
+	node := makeEndpoint("taki", "http://taki:8080")
+	node.SlotGroups = []domain.SlotGroup{{Name: "gpu", Models: []string{"qwen*"}}}
+
+	// The cluster's Olla is running qwen3.6; a qwen3.8 request here would
+	// force a swap under it.
+	q.ObserveBusy(node, BackendBusy{Valid: true, Total: 1, Models: map[string]int{"qwen3.6": 1}})
+	ch := selectAsync(modelCtx("qwen3.8"), q, []*domain.Endpoint{node})
+	waitForDepth(t, q, 1)
+
+	q.ObserveBusy(node, BackendBusy{Valid: true, Total: 0, Models: map[string]int{}})
+	if r := mustReceive(t, ch); r.err != nil {
+		t.Fatalf("qwen3.8 should run once outside traffic clears: %+v", r)
+	}
+}

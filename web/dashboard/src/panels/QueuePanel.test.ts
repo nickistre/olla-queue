@@ -71,6 +71,7 @@ const busy = {
         { model: 'qwen3:8b', slots: 2, in_use: 1, external: 1 },
         { model: 'llama3.1:8b', slots: 3, in_use: 1, external: 0 },
       ],
+      groups: [{ name: 'gpu', slot_source: 'discovered', slots: 1, in_use: 1, external: 0 }],
     },
   ],
 };
@@ -125,5 +126,15 @@ describe('QueuePanel outside traffic', () => {
     expect(cell?.getAttribute('title')).toContain('did not come through this Olla');
     const qwen = [...document.querySelectorAll('.model-slot')].find((p) => p.textContent?.includes('qwen3:8b'));
     expect(qwen?.getAttribute('title')).toContain('1 by other clients');
+  });
+});
+
+describe('QueuePanel slot groups', () => {
+  it('shows each group against its own limit', async () => {
+    await renderWith(busy, () => expect(queue.data?.endpoints?.[0]?.groups?.length).toBe(1));
+    const g = document.querySelector('.group-slot');
+    expect(g?.textContent?.replace(/\s+/g, ' ').trim()).toBe('gpu 1/1');
+    expect(g?.classList.contains('is-full')).toBe(true);
+    expect(g?.getAttribute('title')).toContain('limit 1 from discovered');
   });
 });

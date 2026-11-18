@@ -254,6 +254,15 @@ export interface QueueModelStats {
   external: number;
 }
 
+// One configured slot group's use on an endpoint (see slot_groups).
+export interface QueueGroupStats {
+  name: string;
+  slot_source: string;
+  slots: number;
+  in_use: number;
+  external: number;
+}
+
 export interface QueueEndpointStats {
   name: string;
   url: string;
@@ -262,6 +271,7 @@ export interface QueueEndpointStats {
   in_use: number;
   external: number;
   models: QueueModelStats[];
+  groups: QueueGroupStats[];
 }
 
 export interface QueueWaiter {

@@ -337,18 +337,32 @@ type EndpointConfig struct {
 	// Priority uses a pointer so nil means "omitted in config" rather than explicitly zero.
 	// This lets applyEndpointDefaults distinguish "user set 0" from "user said nothing",
 	// since 0 is a valid, lower-than-default priority value.
-	Priority       *int          `yaml:"priority"`
-	URL            string        `yaml:"url"`
-	Name           string        `yaml:"name"`
-	Type           string        `yaml:"type"`
-	HealthCheckURL string        `yaml:"health_check_url"`
-	ModelURL       string        `yaml:"model_url"`
-	CheckInterval  time.Duration `yaml:"check_interval"`
-	CheckTimeout   time.Duration `yaml:"check_timeout"`
+	Priority       *int   `yaml:"priority"`
+	URL            string `yaml:"url"`
+	Name           string `yaml:"name"`
+	Type           string `yaml:"type"`
+	HealthCheckURL string `yaml:"health_check_url"`
+	ModelURL       string `yaml:"model_url"`
+	// SlotGroups split one node's models into separate capacity pools for the
+	// request queue, e.g. RAM-resident embedding models apart from GPU models
+	// that llama-swap swaps in and out of a single slot.
+	SlotGroups    []SlotGroupConfig `yaml:"slot_groups,omitempty"`
+	CheckInterval time.Duration     `yaml:"check_interval"`
+	CheckTimeout  time.Duration     `yaml:"check_timeout"`
 	// MaxConcurrent caps in-flight requests when proxy.queue is enabled.
 	// 0 = resolve automatically (discovered slots, then queue.default_slots).
 	MaxConcurrent int  `yaml:"max_concurrent"`
 	PreservePath  bool `yaml:"preserve_path"`
+}
+
+// SlotGroupConfig is one capacity pool on an endpoint. A model joins the first
+// group with a matching glob pattern (* wildcard, case-insensitive).
+type SlotGroupConfig struct {
+	Name   string   `yaml:"name"`
+	Models []string `yaml:"models"`
+	// MaxConcurrent caps the group; 0 = the slots of its loaded models, then
+	// queue.default_slots.
+	MaxConcurrent int `yaml:"max_concurrent"`
 }
 
 // LoggingConfig holds logging configuration

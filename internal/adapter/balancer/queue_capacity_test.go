@@ -93,8 +93,10 @@ func TestSlotDiscoverer_LlamaSwapOnlyProbesReadyModelsWithoutAutoload(t *testing
 	if n, ok := d.ModelSlots(ep, "llama"); !ok || n != 3 {
 		t.Fatalf("llama slots = %d/%v, want 3", n, ok)
 	}
-	if _, ok := d.ModelSlots(ep, "gemma"); ok {
-		t.Fatal("a model that is still starting has no slot count yet")
+	// Still starting: no slot count of its own yet, so the cold-model gate
+	// lets one request through while it loads.
+	if n, ok := d.ModelSlots(ep, "gemma"); !ok || n != 1 {
+		t.Fatalf("starting model limit = %d/%v, want the cold gate of 1", n, ok)
 	}
 	for _, m := range probed {
 		if m == "gemma" {
@@ -206,8 +208,9 @@ func TestSlotDiscoverer_NothingLoadedClearsStaleModelLimits(t *testing.T) {
 	if n, src := d.Slots(ep); n != 1 || src != SlotSourceDefault {
 		t.Fatalf("endpoint slots = %d/%s, want default 1", n, src)
 	}
-	if _, ok := d.ModelSlots(ep, "qwen"); ok {
-		t.Fatal("stale per-model limit survived the model being unloaded")
+	// qwen's old limit of 2 must not linger; unloaded, it is cold-gated to 1.
+	if n, _ := d.ModelSlots(ep, "qwen"); n != 1 {
+		t.Fatalf("unloaded qwen limit = %d, want the cold gate of 1 (stale 2 survived?)", n)
 	}
 	if changes.Load() != 2 {
 		t.Fatalf("onChange calls = %d, want 2", changes.Load())
@@ -257,5 +260,42 @@ func TestSlotDiscoverer_PlainModelsListIsNotARouter(t *testing.T) {
 	d.Refresh(context.Background())
 	if n, src := d.Slots(ep); n != 2 || src != SlotSourceDefault {
 		t.Fatalf("got %d/%s, want default 2", n, src)
+	}
+}
+
+func TestSlotDiscoverer_GroupSlotsFromLoadedMembers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/running":
+			_, _ = w.Write([]byte(`{"running":[{"model":"qwen3.6","state":"ready"},{"model":"nomic","state":"ready"}]}`))
+		case "/props":
+			_, _ = w.Write([]byte(`{"total_slots": ` + map[string]string{"qwen3.6": "1", "nomic": "4"}[r.URL.Query().Get("model")] + `}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	ep := probeEndpoint("taki", "openai-compatible", srv.URL)
+	ep.SlotGroups = []domain.SlotGroup{
+		{Name: "embed", Models: []string{"nomic*"}},
+		{Name: "gpu", Models: []string{"qwen*"}},
+		{Name: "pinned", Models: []string{"gemma*"}, MaxConcurrent: 2},
+	}
+	d := NewSlotDiscoverer(staticEndpoints(ep), 1, 0, nil)
+	d.Refresh(context.Background())
+
+	for group, want := range map[string]struct {
+		source string
+		slots  int
+	}{
+		"gpu":    {SlotSourceDiscovered, 1},
+		"embed":  {SlotSourceDiscovered, 4},
+		"pinned": {SlotSourceConfig, 2},
+		"empty":  {SlotSourceDefault, 1},
+	} {
+		if n, src := d.GroupSlots(ep, group); n != want.slots || src != want.source {
+			t.Errorf("group %s = %d/%s, want %d/%s", group, n, src, want.slots, want.source)
+		}
 	}
 }

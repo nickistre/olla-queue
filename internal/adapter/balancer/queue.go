@@ -14,6 +14,7 @@ import (
 	"github.com/thushan/olla/internal/config"
 	"github.com/thushan/olla/internal/core/constants"
 	"github.com/thushan/olla/internal/core/domain"
+	"github.com/thushan/olla/internal/util/pattern"
 )
 
 var (
@@ -43,6 +44,33 @@ type SlotResolver interface {
 	Slots(ep *domain.Endpoint) (slots int, source string)
 	ModelSlots(ep *domain.Endpoint, model string) (slots int, known bool)
 	ModelSlotList(ep *domain.Endpoint) map[string]int
+	// GroupSlots is the limit for one of ep's slot_groups.
+	GroupSlots(ep *domain.Endpoint, group string) (slots int, source string)
+}
+
+// slotGroupOf names the slot group model belongs to on ep: the first group
+// with a matching pattern, or "" when the endpoint has no group for it.
+func slotGroupOf(ep *domain.Endpoint, model string) string {
+	if model == "" {
+		return ""
+	}
+	for _, g := range ep.SlotGroups {
+		for _, p := range g.Models {
+			if pattern.MatchesGlob(model, p) {
+				return g.Name
+			}
+		}
+	}
+	return ""
+}
+
+func slotGroupConfig(ep *domain.Endpoint, group string) (domain.SlotGroup, bool) {
+	for _, g := range ep.SlotGroups {
+		if g.Name == group {
+			return g, true
+		}
+	}
+	return domain.SlotGroup{}, false
 }
 
 // staticSlots resolves from endpoint config only, falling back to a fixed default.
@@ -58,11 +86,19 @@ func (s staticSlots) Slots(ep *domain.Endpoint) (int, string) {
 func (staticSlots) ModelSlots(*domain.Endpoint, string) (int, bool) { return 0, false }
 func (staticSlots) ModelSlotList(*domain.Endpoint) map[string]int   { return nil }
 
+func (s staticSlots) GroupSlots(ep *domain.Endpoint, group string) (int, string) {
+	if g, ok := slotGroupConfig(ep, group); ok && g.MaxConcurrent > 0 {
+		return g.MaxConcurrent, SlotSourceConfig
+	}
+	return s.fallback, SlotSourceDefault
+}
+
 // reservation records which endpoint and model a Select claimed, so the
 // matching DecrementConnections releases the right per-model slot.
 type reservation struct {
 	url   string
 	model string
+	group string
 }
 
 // modelKey joins endpoint and model for the per-model counters. NUL cannot
@@ -109,6 +145,10 @@ type QueueWrapper struct {
 	// requests, per endpoint and per endpoint+model (see ObserveBusy).
 	external      map[string]int
 	modelExternal map[string]int
+	// groupInUse and groupExternal are the same counts per slot group, keyed
+	// by modelKey(url, group).
+	groupInUse    map[string]int
+	groupExternal map[string]int
 	// reservations is keyed by the endpoint copy Select hands out, which is
 	// unique per request; see reserveLocked.
 	reservations map[*domain.Endpoint]reservation
@@ -152,6 +192,8 @@ func NewQueueWrapper(inner domain.EndpointSelector, cfg config.QueueConfig, reso
 		modelInUse:    make(map[string]int),
 		external:      make(map[string]int),
 		modelExternal: make(map[string]int),
+		groupInUse:    make(map[string]int),
+		groupExternal: make(map[string]int),
 		reservations:  make(map[*domain.Endpoint]reservation),
 		known:         make(map[string]*domain.Endpoint),
 		modelOf:       requestedModel,
@@ -345,19 +387,31 @@ func (q *QueueWrapper) ObserveBusy(ep *domain.Endpoint, b BackendBusy) {
 	}
 
 	prefix := modelKey(url, "")
-	for k := range q.modelExternal {
-		if strings.HasPrefix(k, prefix) {
-			delete(q.modelExternal, k)
+	for _, m := range []map[string]int{q.modelExternal, q.groupExternal} {
+		for k := range m {
+			if strings.HasPrefix(k, prefix) {
+				delete(m, k)
+			}
 		}
 	}
 	if !b.Valid {
 		delete(q.external, url)
 	} else {
 		q.external[url] = max(0, b.Total-q.inUse[url])
+		groupRunning := make(map[string]int)
 		for model, n := range b.Models {
 			k := modelKey(url, model)
 			if ext := n - q.modelInUse[k]; ext > 0 {
 				q.modelExternal[k] = ext
+			}
+			if g := slotGroupOf(ep, model); g != "" {
+				groupRunning[g] += n
+			}
+		}
+		for g, n := range groupRunning {
+			k := modelKey(url, g)
+			if ext := n - q.groupInUse[k]; ext > 0 {
+				q.groupExternal[k] = ext
 			}
 		}
 	}
@@ -448,9 +502,13 @@ func (q *QueueWrapper) reserveLocked(ctx context.Context, free []*domain.Endpoin
 		return nil, err
 	}
 	res := reservation{url: ep.URLString, model: q.modelOf(ctx, ep)}
+	res.group = slotGroupOf(ep, res.model)
 	q.inUse[res.url]++
 	if res.model != "" {
 		q.modelInUse[modelKey(res.url, res.model)]++
+	}
+	if res.group != "" {
+		q.groupInUse[modelKey(res.url, res.group)]++
 	}
 	claimed := *ep
 	q.reservations[&claimed] = res
@@ -479,12 +537,18 @@ func (q *QueueWrapper) releaseLocked(ep *domain.Endpoint) {
 		q.inUse[res.url]--
 	}
 	if res.model != "" {
-		k := modelKey(res.url, res.model)
-		if q.modelInUse[k] > 1 {
-			q.modelInUse[k]--
-		} else {
-			delete(q.modelInUse, k)
-		}
+		decrementOrDelete(q.modelInUse, modelKey(res.url, res.model))
+	}
+	if res.group != "" {
+		decrementOrDelete(q.groupInUse, modelKey(res.url, res.group))
+	}
+}
+
+func decrementOrDelete(m map[string]int, k string) {
+	if m[k] > 1 {
+		m[k]--
+	} else {
+		delete(m, k)
 	}
 }
 
@@ -505,6 +569,12 @@ func (q *QueueWrapper) freeLocked(ctx context.Context, endpoints []*domain.Endpo
 			k := modelKey(ep.URLString, model)
 			if limit, known := q.resolver.ModelSlots(ep, model); known && q.modelInUse[k]+q.modelExternal[k] >= limit {
 				continue
+			}
+			if g := slotGroupOf(ep, model); g != "" {
+				gk := modelKey(ep.URLString, g)
+				if limit, _ := q.resolver.GroupSlots(ep, g); q.groupInUse[gk]+q.groupExternal[gk] >= limit {
+					continue
+				}
 			}
 		}
 		free = append(free, ep)
@@ -555,6 +625,23 @@ func (q *QueueWrapper) modelStatsLocked(ep *domain.Endpoint) []QueueModelStats {
 	return out
 }
 
+// groupStatsLocked lists ep's configured slot groups in config order.
+func (q *QueueWrapper) groupStatsLocked(ep *domain.Endpoint) []QueueGroupStats {
+	out := make([]QueueGroupStats, 0, len(ep.SlotGroups))
+	for _, g := range ep.SlotGroups {
+		slots, source := q.resolver.GroupSlots(ep, g.Name)
+		k := modelKey(ep.URLString, g.Name)
+		out = append(out, QueueGroupStats{
+			Name:       g.Name,
+			Slots:      slots,
+			SlotSource: source,
+			InUse:      q.groupInUse[k],
+			External:   q.groupExternal[k],
+		})
+	}
+	return out
+}
+
 // waiterAt unwraps a queue element. The list only ever holds *queueWaiter.
 func waiterAt(e *list.Element) *queueWaiter {
 	w, _ := e.Value.(*queueWaiter)
@@ -581,12 +668,22 @@ type QueueModelStats struct {
 	External int `json:"external"`
 }
 
+// QueueGroupStats is one slot group's use on an endpoint.
+type QueueGroupStats struct {
+	Name       string `json:"name"`
+	SlotSource string `json:"slot_source"`
+	Slots      int    `json:"slots"`
+	InUse      int    `json:"in_use"`
+	External   int    `json:"external"`
+}
+
 // QueueEndpointStats is the per-endpoint slot view.
 type QueueEndpointStats struct {
 	Name       string            `json:"name"`
 	URL        string            `json:"url"`
 	SlotSource string            `json:"slot_source"`
 	Models     []QueueModelStats `json:"models"`
+	Groups     []QueueGroupStats `json:"groups"`
 	Slots      int               `json:"slots"`
 	InUse      int               `json:"in_use"`
 	// External is slots the backend reports busy beyond this Olla's own.
@@ -650,6 +747,7 @@ func (q *QueueWrapper) Stats() QueueStats {
 			InUse:      q.inUse[url],
 			External:   q.external[url],
 			Models:     q.modelStatsLocked(ep),
+			Groups:     q.groupStatsLocked(ep),
 		})
 	}
 	waiting := make([]QueueWaiterStats, 0, depth)

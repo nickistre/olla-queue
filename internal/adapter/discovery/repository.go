@@ -203,6 +203,7 @@ func (r *StaticEndpointRepository) LoadFromConfig(ctx context.Context, configs [
 			NextCheckTime:         now,
 			PreservePath:          cfg.PreservePath,
 			MaxConcurrent:         cfg.MaxConcurrent,
+			SlotGroups:            slotGroups(cfg.SlotGroups),
 		}
 
 		if cfg.Auth != nil {
@@ -375,4 +376,15 @@ func (r *StaticEndpointRepository) validateEndpointConfig(cfg config.EndpointCon
 	}
 
 	return nil
+}
+
+func slotGroups(cfg []config.SlotGroupConfig) []domain.SlotGroup {
+	if len(cfg) == 0 {
+		return nil
+	}
+	out := make([]domain.SlotGroup, len(cfg))
+	for i, g := range cfg {
+		out[i] = domain.SlotGroup{Name: g.Name, Models: append([]string(nil), g.Models...), MaxConcurrent: g.MaxConcurrent}
+	}
+	return out
 }

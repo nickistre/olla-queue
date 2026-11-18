@@ -27,6 +27,10 @@ const (
 	// busyStreamMaxLine fits llama-swap's modelStatus message, which carries
 	// every configured model, on one SSE data line.
 	busyStreamMaxLine = 4 << 20
+	// modelChangeSettle delays the re-discovery a model change triggers. A
+	// load sends a burst of modelStatus messages (progress, then ready), so
+	// this waits for the burst to settle and probes once.
+	modelChangeSettle = 500 * time.Millisecond
 )
 
 // BackendBusy is what a backend reports as running right now: every request,
@@ -246,6 +250,27 @@ func (t *BusyTracker) streamLlamaSwap(ctx context.Context, ep *domain.Endpoint) 
 		return fmt.Errorf("/api/events returned %d", resp.StatusCode)
 	}
 
+	// A model starting, finishing loading or stopping changes which models
+	// hold slots, so re-run discovery for this node rather than wait for the
+	// next periodic refresh. Trailing-edge debounce: every message restarts
+	// the timer, and the probe runs once the burst has settled.
+	var settle *time.Timer
+	defer func() {
+		if settle != nil {
+			settle.Stop()
+		}
+	}()
+	modelChanged := func() {
+		if settle != nil {
+			settle.Stop()
+		}
+		settle = time.AfterFunc(modelChangeSettle, func() {
+			if ctx.Err() == nil {
+				t.disc.RefreshEndpoint(ctx, ep)
+			}
+		})
+	}
+
 	feed := newInflightFeed()
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 64<<10), busyStreamMaxLine)
@@ -254,7 +279,14 @@ func (t *BusyTracker) streamLlamaSwap(ctx context.Context, ep *domain.Endpoint) 
 		if !ok {
 			continue
 		}
-		if b, changed := feed.apply([]byte(strings.TrimSpace(data))); changed {
+		payload := []byte(strings.TrimSpace(data))
+		if gjson.GetBytes(payload, "type").String() == "modelStatus" {
+			// Includes the state sent on connect: after a reconnect it may
+			// reflect a swap that happened while the feed was down.
+			modelChanged()
+			continue
+		}
+		if b, changed := feed.apply(payload); changed {
 			t.sink(ep, b)
 		}
 	}

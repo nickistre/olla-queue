@@ -196,6 +196,17 @@
               {fmtInt(e.in_use)}{#if e.external > 0}<span class="external" title="Busy with traffic that did not come through this Olla">+{fmtInt(e.external)}</span>{/if}<span class="unit">/ {fmtInt(e.slots)}</span>
             </td>
             <td class={cellClass('models_in_use')}>
+              {#if e.groups.length > 0}
+                <span class="model-slots group-slots">
+                  {#each e.groups as g (g.name)}
+                    <span
+                      class="pill model-slot group-slot"
+                      class:is-full={g.slots > 0 && g.in_use + g.external >= g.slots}
+                      title="Slot group {g.name}: {g.in_use} in use by Olla{g.external > 0 ? `, ${g.external} by other clients` : ''}, limit {g.slots} from {g.slot_source}"
+                    >{g.name} <strong>{fmtInt(g.in_use)}{#if g.external > 0}<span class="external">+{fmtInt(g.external)}</span>{/if}/{fmtInt(g.slots)}</strong></span>
+                  {/each}
+                </span>
+              {/if}
               {#if e.models.length > 0}
                 <span class="model-slots">
                   {#each e.models as m (m.model)}
@@ -237,6 +248,12 @@
   }
   .external {
     color: var(--blue);
+  }
+  .group-slots {
+    margin-bottom: 4px;
+  }
+  .group-slot {
+    font-weight: 600;
   }
   .model-slot.is-full {
     color: var(--amber);

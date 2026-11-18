@@ -18,6 +18,14 @@ const (
 	StatusStringRateLimited = "rate_limited"
 )
 
+// SlotGroup is one request-queue capacity pool on an endpoint; see
+// config.SlotGroupConfig.
+type SlotGroup struct {
+	Name          string   `json:"name"`
+	Models        []string `json:"models"`
+	MaxConcurrent int      `json:"max_concurrent"`
+}
+
 type Endpoint struct {
 	LastChecked   time.Time
 	NextCheckTime time.Time
@@ -45,10 +53,12 @@ type Endpoint struct {
 	// AuthHeaderValue is the fully composed header value (e.g. "Bearer tok", "Basic base64(...)").
 	// Never serialised; leaking credentials through logs or status endpoints would be a security issue.
 	AuthHeaderValue string `json:"-"`
-	LastLatency     time.Duration
-	CheckInterval   time.Duration
-	CheckTimeout    time.Duration
-	Priority        int
+	// SlotGroups partition the endpoint's models for the request queue.
+	SlotGroups    []SlotGroup `json:"-"`
+	LastLatency   time.Duration
+	CheckInterval time.Duration
+	CheckTimeout  time.Duration
+	Priority      int
 	// MaxConcurrent is the configured slot override for the request queue; 0 = automatic.
 	MaxConcurrent       int
 	ConsecutiveFailures int
