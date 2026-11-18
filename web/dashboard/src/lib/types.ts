@@ -248,6 +248,8 @@ export interface ProcessStatsResponse {
 // limit for the model; it is then bounded only by the endpoint's limit.
 export interface QueueModelStats {
   model: string;
+  // Slot group the model belongs to; '' when none.
+  group: string;
   slots: number;
   in_use: number;
   // Slots busy with traffic that did not come through this Olla.
@@ -258,6 +260,8 @@ export interface QueueModelStats {
 export interface QueueGroupStats {
   name: string;
   slot_source: string;
+  // 'loaded', 'cold' (nothing loaded; the next request loads a model) or 'unknown'.
+  state: string;
   slots: number;
   in_use: number;
   external: number;
@@ -270,6 +274,10 @@ export interface QueueEndpointStats {
   slots: number;
   in_use: number;
   external: number;
+  // Live health status from the health checker (healthy, busy, warming, offline, ...).
+  health: string;
+  // The queue holds it as offline (health report or failed connection).
+  down: boolean;
   models: QueueModelStats[];
   groups: QueueGroupStats[];
 }

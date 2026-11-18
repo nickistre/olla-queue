@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { queueRows, fmtClockTime, slotFillPct, windowSpanMs } from './queue';
+import { queueRows, fmtClockTime, slotFillPct, windowSpanMs, slotLines, slotStatus, slotStatusRank } from './queue';
 import { windowMeanWaitMs, type Sample } from './stores/history.svelte';
 import { parseQueue } from './runtime';
-import type { QueueWaiter } from './types';
+import type { QueueEndpointStats, QueueWaiter } from './types';
 
 const waiter = (o: Partial<QueueWaiter> = {}): QueueWaiter => ({
   enqueued_at: '2026-11-17T10:00:00Z',
@@ -134,7 +134,7 @@ describe('parseQueue', () => {
     expect(
       parseQueue({ enabled: true, endpoints: [{ name: 'n', models: [{ model: 'q', slots: 2, in_use: 1 }] }] })
         ?.endpoints[0].models[0],
-    ).toEqual({ model: 'q', slots: 2, in_use: 1, external: 0 });
+    ).toEqual({ model: 'q', group: '', slots: 2, in_use: 1, external: 0 });
     expect(q?.waiting[0].sticky_endpoint).toBe('');
     expect(q?.endpoints).toEqual([]);
   });
@@ -143,5 +143,79 @@ describe('parseQueue', () => {
     expect(parseQueue({ enabled: true, depth: 'three' })).toBeNull();
     expect(parseQueue({ enabled: true, waiting: 'nope' })).toBeNull();
     expect(parseQueue(null)).toBeNull();
+  });
+});
+
+const endpoint = (o: Partial<QueueEndpointStats> = {}): QueueEndpointStats => ({
+  name: 'taki',
+  url: 'http://taki:1',
+  slot_source: 'discovered',
+  slots: 5,
+  in_use: 0,
+  external: 0,
+  health: 'healthy',
+  down: false,
+  models: [],
+  groups: [],
+  ...o,
+});
+const line = (o: Partial<{ label: string; slots: number; in_use: number; external: number }> = {}) => ({
+  label: '',
+  slots: 2,
+  in_use: 0,
+  external: 0,
+  ...o,
+});
+
+describe('slotStatus', () => {
+  it.each([
+    ['down by the queue', endpoint({ down: true }), line(), '', 'Offline'],
+    ['offline health', endpoint({ health: 'offline' }), line(), '', 'Offline'],
+    ['unhealthy health', endpoint({ health: 'unhealthy' }), line(), '', 'Offline'],
+    ['config error', endpoint({ health: 'config_error' }), line(), '', 'Config error'],
+    ['rate limited', endpoint({ health: 'rate_limited' }), line(), '', 'Rate limited'],
+    ['not checked yet', endpoint({ health: 'unknown' }), line(), '', 'Unknown'],
+    ['full with outside traffic', endpoint(), line({ in_use: 1, external: 1 }), '', 'Busy'],
+    ['group under an endpoint-wide limit that is full', endpoint({ in_use: 5 }), line({ label: 'gpu' }), '', 'Busy'],
+    ['warming', endpoint({ health: 'warming' }), line(), '', 'Warming'],
+    ['cold group', endpoint(), line({ label: 'gpu' }), 'cold', 'Cold'],
+    ['room to spare', endpoint({ health: 'busy' }), line({ in_use: 1 }), 'loaded', 'Available'],
+  ])('%s', (_name, e, l, state, want) => {
+    expect(slotStatus(e, l, state).status).toBe(want);
+  });
+
+  it('ranks trouble ahead of availability', () => {
+    expect(slotStatusRank('Offline')).toBeLessThan(slotStatusRank('Busy'));
+    expect(slotStatusRank('Busy')).toBeLessThan(slotStatusRank('Available'));
+  });
+});
+
+describe('slotLines', () => {
+  it('is one endpoint-wide line without groups', () => {
+    const lines = slotLines(endpoint({ in_use: 2, models: [{ model: 'm', group: '', slots: 0, in_use: 2, external: 0 }] }));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ label: '', slots: 5, in_use: 2, status: 'Available' });
+    expect(lines[0].models.map((m) => m.model)).toEqual(['m']);
+  });
+
+  it('is one line per group with its models, then the ungrouped ones', () => {
+    const lines = slotLines(
+      endpoint({
+        models: [
+          { model: 'nomic', group: 'emb', slots: 4, in_use: 0, external: 0 },
+          { model: 'qwen', group: 'gpu', slots: 1, in_use: 1, external: 0 },
+          { model: 'tiny', group: '', slots: 0, in_use: 0, external: 0 },
+        ],
+        groups: [
+          { name: 'emb', slot_source: 'discovered', state: 'loaded', slots: 4, in_use: 0, external: 0 },
+          { name: 'gpu', slot_source: 'config', state: 'loaded', slots: 1, in_use: 1, external: 0 },
+        ],
+      }),
+    );
+    expect(lines.map((l) => [l.label, l.status, l.models.map((m) => m.model)])).toEqual([
+      ['emb', 'Available', ['nomic']],
+      ['gpu', 'Busy', ['qwen']],
+      ['ungrouped', 'Available', ['tiny']],
+    ]);
   });
 });

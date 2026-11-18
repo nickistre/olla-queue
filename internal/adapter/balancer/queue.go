@@ -958,6 +958,7 @@ func (q *QueueWrapper) modelStatsLocked(ep *domain.Endpoint) []QueueModelStats {
 	}
 	out := make([]QueueModelStats, 0, len(byModel))
 	for _, m := range byModel {
+		m.Group = slotGroupOf(ep, m.Model)
 		out = append(out, *m)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
@@ -1006,11 +1007,36 @@ func (q *QueueWrapper) groupStatsLocked(ep *domain.Endpoint) []QueueGroupStats {
 			Name:       g.Name,
 			Slots:      slots,
 			SlotSource: source,
+			State:      q.groupStateLocked(ep, g),
 			InUse:      q.groupInUse[k],
 			External:   q.groupExternal[k],
 		})
 	}
 	return out
+}
+
+// groupStateLocked is "loaded" when a member model is loaded, "cold" when
+// the backend tracks loading and none is, so the next request loads one,
+// and "unknown" when the backend doesn't say.
+func (q *QueueWrapper) groupStateLocked(ep *domain.Endpoint, g domain.SlotGroup) string {
+	for model := range q.resolver.ModelSlotList(ep) {
+		if slotGroupOf(ep, model) == g.Name && q.resolver.ModelState(ep, model) == ModelStateLoaded {
+			return GroupStateLoaded
+		}
+	}
+	if len(g.Models) == 0 {
+		return GroupStateUnknown
+	}
+	// No loaded member: ask about one by name. A backend that tracks loading
+	// reports any model it isn't running as cold.
+	switch q.resolver.ModelState(ep, g.Models[0]) {
+	case ModelStateCold:
+		return GroupStateCold
+	case ModelStateLoaded:
+		return GroupStateLoaded
+	case ModelStateUnknown:
+	}
+	return GroupStateUnknown
 }
 
 // waiterAt unwraps a queue element. The list only ever holds *queueWaiter.
@@ -1033,6 +1059,8 @@ func storeMax(v *atomic.Int64, n int64) {
 // endpoint-wide limit).
 type QueueModelStats struct {
 	Model string `json:"model"`
+	// Group is the slot group the model belongs to; empty when none.
+	Group string `json:"group,omitempty"`
 	Slots int    `json:"slots"`
 	InUse int    `json:"in_use"`
 	// External is slots busy with traffic that did not come through this Olla.
@@ -1043,23 +1071,38 @@ type QueueModelStats struct {
 type QueueGroupStats struct {
 	Name       string `json:"name"`
 	SlotSource string `json:"slot_source"`
-	Slots      int    `json:"slots"`
-	InUse      int    `json:"in_use"`
-	External   int    `json:"external"`
+	// State is GroupStateLoaded, GroupStateCold or GroupStateUnknown.
+	State    string `json:"state"`
+	Slots    int    `json:"slots"`
+	InUse    int    `json:"in_use"`
+	External int    `json:"external"`
 }
 
 // QueueEndpointStats is the per-endpoint slot view.
 type QueueEndpointStats struct {
-	Name       string            `json:"name"`
-	URL        string            `json:"url"`
-	SlotSource string            `json:"slot_source"`
-	Models     []QueueModelStats `json:"models"`
-	Groups     []QueueGroupStats `json:"groups"`
-	Slots      int               `json:"slots"`
-	InUse      int               `json:"in_use"`
+	Name       string `json:"name"`
+	URL        string `json:"url"`
+	SlotSource string `json:"slot_source"`
+	// Health is the endpoint's health status. The queue only has the copy it
+	// last saw, so the stats handler overwrites it with the live one.
+	Health string            `json:"health"`
+	Models []QueueModelStats `json:"models"`
+	Groups []QueueGroupStats `json:"groups"`
+	Slots  int               `json:"slots"`
+	InUse  int               `json:"in_use"`
 	// External is slots the backend reports busy beyond this Olla's own.
 	External int `json:"external"`
+	// Down is set while the queue holds the endpoint as offline: reported by
+	// the health checker or by a failed connection, until it recovers.
+	Down bool `json:"down"`
 }
+
+// Slot group states for QueueGroupStats.State.
+const (
+	GroupStateLoaded  = "loaded"
+	GroupStateCold    = "cold"
+	GroupStateUnknown = "unknown"
+)
 
 // QueueWaiterStats describes one request waiting in the queue.
 type QueueWaiterStats struct {
@@ -1121,7 +1164,10 @@ func (q *QueueWrapper) Stats() QueueStats {
 	for url, ep := range q.known {
 		slots, source := q.resolver.Slots(ep)
 		names[url] = ep.Name
+		_, isDown := q.down[url]
 		eps = append(eps, QueueEndpointStats{
+			Health:     ep.Status.String(),
+			Down:       isDown,
 			Name:       ep.Name,
 			URL:        url,
 			Slots:      slots,

@@ -5,7 +5,16 @@
   import SortableTable from '../components/SortableTable.svelte';
   import type { Column, SortState } from '../components/SortableTable.svelte';
   import { fmtInt, fmtMs, fmtDuration } from '../lib/format';
-  import { queueRows, fmtClockTime, slotFillPct, type QueueRow } from '../lib/queue';
+  import {
+    queueRows,
+    fmtClockTime,
+    slotFillPct,
+    slotLines,
+    slotStatusRank,
+    type QueueRow,
+    type SlotLine,
+    type SlotStatus,
+  } from '../lib/queue';
   import { getNow as liveNow } from '../lib/clock.svelte';
   import type { QueueEndpointStats, QueueModelStats } from '../lib/types';
 
@@ -53,16 +62,37 @@
   ];
   const waitingSort: SortState = { key: 'position', dir: 'asc' };
 
-  type SlotRow = Omit<QueueEndpointStats, never> & { fill_pct: number; models_in_use: number };
+  // One row per slot group, labelled "endpoint (group)"; an endpoint without
+  // groups is a single row. Models outside every group get an "ungrouped" row.
+  type SlotRow = Omit<SlotLine, never> & {
+    endpoint: QueueEndpointStats;
+    id: string;
+    name: string;
+    status_rank: number;
+    fill_pct: number;
+    models_in_use: number;
+  };
   const slotRows = $derived<SlotRow[]>(
-    (data?.endpoints ?? []).map((e) => ({
-      ...e,
-      fill_pct: slotFillPct(e.in_use, e.slots),
-      models_in_use: e.models.reduce((n, m) => n + m.in_use, 0),
-    })),
+    (data?.endpoints ?? []).flatMap((e) =>
+      slotLines(e).map((l) => ({
+        ...l,
+        endpoint: e,
+        id: `${e.url}#${l.label}`,
+        name: l.label ? `${e.name} (${l.label})` : e.name,
+        status_rank: slotStatusRank(l.status),
+        fill_pct: slotFillPct(l.in_use + l.external, l.slots),
+        models_in_use: l.models.reduce((n, m) => n + m.in_use, 0),
+      })),
+    ),
   );
   const slotColumns: Column[] = [
     { key: 'name', label: 'Endpoint', sortable: true, sticky: true },
+    {
+      key: 'status_rank',
+      label: 'Status',
+      sortable: true,
+      title: 'Available: a slot is free · Busy: full, requests wait · Cold: nothing in the group loaded · Offline: failing health checks or a failed connection',
+    },
     { key: 'fill_pct', label: 'Slots in use', sortable: true, num: true, align: 'right' },
     {
       key: 'models_in_use',
@@ -82,10 +112,31 @@
   const slotSort: SortState = { key: 'name', dir: 'asc' };
 
   // Outside traffic occupies slots just as ours does, so fullness counts both.
-  function fillCls(r: SlotRow): string {
-    const taken = r.in_use + r.external;
-    if (taken >= r.slots && r.slots > 0) return 'amber';
+  function fillCls(l: SlotLine): string {
+    const taken = l.in_use + l.external;
+    if (taken >= l.slots && l.slots > 0) return 'amber';
     return taken > 0 ? 'green' : 'neutral';
+  }
+
+  const STATUS_CLS: Record<SlotStatus, string> = {
+    Available: 'green',
+    Busy: 'amber',
+    Cold: 'blue',
+    Warming: 'neutral',
+    Unknown: 'neutral',
+    Offline: 'red',
+    'Rate limited': 'red',
+    'Config error': 'red',
+  };
+
+  // With groups the endpoint-wide total has no line of its own; it still caps
+  // every group, so it goes in the name's tooltip.
+  function endpointTitle(r: SlotRow): string {
+    const e = r.endpoint;
+    if (!r.label) return e.url;
+    const what = r.label === 'ungrouped' ? 'Models outside every slot group, limited only by the endpoint' : `Slot group ${r.label}`;
+    const ext = e.external > 0 ? ` +${e.external} other clients` : '';
+    return `${what}\n${e.url}: ${e.in_use}${ext} of ${e.slots} slots in use endpoint-wide (${e.slot_source})`;
   }
 
   function modelTitle(m: QueueModelStats): string {
@@ -195,28 +246,25 @@
         <span class="section-note">endpoints appear once the queue has routed to them · <span class="external">+N</span> = busy with other clients' traffic</span>
       </div>
       {#if slotRows.length > 0}
-        <SortableTable columns={slotColumns} rows={slotRows} initialSort={slotSort} rowId={(row) => row.url}>
-          {#snippet rowSnippet({ row: e, cellClass })}
-            <td class="col-sticky">{e.name}</td>
+        <SortableTable columns={slotColumns} rows={slotRows} initialSort={slotSort} rowId={(row) => row.id}>
+          {#snippet rowSnippet({ row: l, cellClass })}
+            <td class="col-sticky" title={endpointTitle(l)}>
+              {l.endpoint.name}{#if l.label}{' '}<span class="group-label" class:is-other={l.label === 'ungrouped'}
+                  >({l.label})</span
+                >{/if}
+            </td>
+            <td title={l.reason}>
+              <span class="glyph g-{STATUS_CLS[l.status]}" aria-hidden="true">●</span>
+              <span class="status status-{STATUS_CLS[l.status]}">{l.status}</span>
+            </td>
             <td class={cellClass('fill_pct')}>
-              <span class="glyph g-{fillCls(e)}" aria-hidden="true">●</span>
-              {fmtInt(e.in_use)}{#if e.external > 0}<span class="external" title="Busy with traffic that did not come through this Olla">+{fmtInt(e.external)}</span>{/if}<span class="unit">/ {fmtInt(e.slots)}</span>
+              <span class="glyph g-{fillCls(l)}" aria-hidden="true">●</span>
+              {fmtInt(l.in_use)}{#if l.external > 0}<span class="external" title="Busy with traffic that did not come through this Olla">+{fmtInt(l.external)}</span>{/if}<span class="unit">/ {fmtInt(l.slots)}</span>
             </td>
             <td class={cellClass('models_in_use')}>
-              {#if e.groups.length > 0}
-                <span class="model-slots group-slots">
-                  {#each e.groups as g (g.name)}
-                    <span
-                      class="pill model-slot group-slot"
-                      class:is-full={g.slots > 0 && g.in_use + g.external >= g.slots}
-                      title="Slot group {g.name}: {g.in_use} in use by Olla{g.external > 0 ? `, ${g.external} by other clients` : ''}, limit {g.slots} from {g.slot_source}"
-                    >{g.name} <strong>{fmtInt(g.in_use)}{#if g.external > 0}<span class="external">+{fmtInt(g.external)}</span>{/if}/{fmtInt(g.slots)}</strong></span>
-                  {/each}
-                </span>
-              {/if}
-              {#if e.models.length > 0}
+              {#if l.models.length > 0}
                 <span class="model-slots">
-                  {#each e.models as m (m.model)}
+                  {#each l.models as m (m.model)}
                     <span
                       class="pill model-slot"
                       class:is-full={m.slots > 0 && m.in_use + m.external >= m.slots}
@@ -226,7 +274,7 @@
                 </span>
               {:else}<span class="dash">—</span>{/if}
             </td>
-            <td>{e.slot_source || '—'}</td>
+            <td>{l.slot_source || '—'}</td>
           {/snippet}
         </SortableTable>
       {:else}
@@ -256,11 +304,29 @@
   .external {
     color: var(--blue);
   }
-  .group-slots {
-    margin-bottom: 4px;
+  .group-label {
+    color: var(--text-dim);
   }
-  .group-slot {
-    font-weight: 600;
+  .glyph.g-blue {
+    color: var(--blue);
+  }
+  .group-label.is-other {
+    font-style: italic;
+  }
+  .status-green {
+    color: var(--green);
+  }
+  .status-amber {
+    color: var(--amber);
+  }
+  .status-red {
+    color: var(--red);
+  }
+  .status-blue {
+    color: var(--blue);
+  }
+  .status-neutral {
+    color: var(--text-dim);
   }
   .tag {
     font-size: 0.66rem;

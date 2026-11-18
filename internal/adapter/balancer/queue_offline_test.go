@@ -184,3 +184,47 @@ func TestQueue_FailedConnectionSlotIsNotHandedOn(t *testing.T) {
 		t.Fatalf("want dispatch to a once recovered, got %+v", r)
 	}
 }
+
+// The dashboard lays models out under their group and shows a group with
+// nothing loaded as cold, and an endpoint the queue holds as down as offline.
+func TestQueue_StatsReportGroupsStateAndDown(t *testing.T) {
+	node := makeEndpoint("taki", "http://taki:1")
+	node.SlotGroups = []domain.SlotGroup{
+		{Name: "taki-embeddings", Models: []string{"nomic*"}},
+		{Name: "taki-gpu", Models: []string{"qwen*"}},
+	}
+	res := modelSlots{
+		endpoint: 5,
+		models:   map[string]int{"nomic-embed": 4, "llama": 1},
+		loaded:   map[string][]string{"http://taki:1": {"nomic-embed", "llama"}},
+	}
+	q := NewQueueWrapper(NewRoundRobinSelector(NewTestStatsCollector()), defaultQueueConfig(), res)
+	t.Cleanup(q.Stop)
+	if _, err := q.Select(modelCtx("nomic-embed"), []*domain.Endpoint{node}); err != nil {
+		t.Fatal(err)
+	}
+
+	ep := q.Stats().Endpoints[0]
+	if ep.Health != "healthy" || ep.Down {
+		t.Fatalf("health %q down %v", ep.Health, ep.Down)
+	}
+	groups := map[string]string{}
+	for _, g := range ep.Groups {
+		groups[g.Name] = g.State
+	}
+	if groups["taki-embeddings"] != GroupStateLoaded || groups["taki-gpu"] != GroupStateCold {
+		t.Fatalf("group states = %v", groups)
+	}
+	modelGroups := map[string]string{}
+	for _, m := range ep.Models {
+		modelGroups[m.Model] = m.Group
+	}
+	if modelGroups["nomic-embed"] != "taki-embeddings" || modelGroups["llama"] != "" {
+		t.Fatalf("model groups = %v", modelGroups)
+	}
+
+	q.EndpointFailed(node)
+	if !q.Stats().Endpoints[0].Down {
+		t.Fatal("endpoint should report down after a failed connection")
+	}
+}

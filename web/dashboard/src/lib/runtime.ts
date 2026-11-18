@@ -185,11 +185,14 @@ export const parseQueue = guarded((raw: unknown): QueueStatsResponse | null => {
     slots: num(e.slots),
     in_use: num(e.in_use),
     external: num(e.external),
+    health: str(e.health),
+    down: e.down === true,
     models: arr(e.models)
       .filter(isObj)
       .map(
         (m): QueueModelStats => ({
           model: str(m.model),
+          group: str(m.group),
           slots: num(m.slots),
           in_use: num(m.in_use),
           external: num(m.external),
@@ -201,6 +204,7 @@ export const parseQueue = guarded((raw: unknown): QueueStatsResponse | null => {
         (g): QueueGroupStats => ({
           name: str(g.name),
           slot_source: str(g.slot_source),
+          state: str(g.state),
           slots: num(g.slots),
           in_use: num(g.in_use),
           external: num(g.external),

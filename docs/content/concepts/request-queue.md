@@ -183,7 +183,13 @@ The client IP honours `X-Forwarded-For` / `X-Real-IP` only from `server.rate_lim
 While the queue is on, the dashboard at `/internal/ui/` shows it in three places:
 - **Activity chart:** a dashed queue-depth line, with the current depth in the readout.
 - **Overview tiles:** "Queued requests" (depth against `max_size`) and "Mean queue wait". The mean covers the chart's window (about 15 minutes), so it reflects current conditions and clears once the queue drains.
-- **Queue tab:** the waiting requests and each endpoint's slot usage, including where its limit came from and each model's use against its own limit.
+- **Queue tab:** the waiting requests and each endpoint's slot usage, including where its limit came from and each model's use against its own limit. An endpoint with slot groups gets one row per group, labelled `endpoint (group)`, plus an `endpoint (ungrouped)` row for models outside every group. Each row has a status:
+  - **Available**: a slot is free.
+  - **Busy**: every slot is taken, or, for a group, the endpoint-wide limit is reached. New requests wait.
+  - **Cold**: no model in the group is loaded, so the next request loads one, perhaps by swapping another out.
+  - **Warming**: the backend is starting up.
+  - **Offline**: failing health checks, or a connection to it failed and no health check has passed since.
+  - **Unknown**, **Rate limited**, **Config error**: the matching health status.
 
 ## Configuration
 

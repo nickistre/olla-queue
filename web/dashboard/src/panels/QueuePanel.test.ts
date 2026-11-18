@@ -74,11 +74,13 @@ const busy = {
       slots: 5,
       in_use: 2,
       external: 1,
+      health: 'healthy',
+      down: false,
       models: [
-        { model: 'qwen3:8b', slots: 2, in_use: 1, external: 1 },
+        { model: 'qwen3:8b', group: 'gpu', slots: 2, in_use: 1, external: 1 },
         { model: 'llama3.1:8b', slots: 3, in_use: 1, external: 0 },
       ],
-      groups: [{ name: 'gpu', slot_source: 'discovered', slots: 1, in_use: 1, external: 0 }],
+      groups: [{ name: 'gpu', slot_source: 'discovered', state: 'loaded', slots: 1, in_use: 1, external: 0 }],
     },
   ],
 };
@@ -136,13 +138,76 @@ describe('QueuePanel outside traffic', () => {
   });
 });
 
+// The Taki layout: one line per slot group beside the endpoint name, each with
+// its own status and slots.
+const taki = {
+  ...busy,
+  endpoints: [
+    {
+      name: 'Taki',
+      url: 'http://taki:8080',
+      slot_source: 'discovered',
+      slots: 5,
+      in_use: 1,
+      external: 0,
+      health: 'healthy',
+      down: false,
+      models: [
+        { model: 'nomic-embed-text-v1.5', group: 'taki-embeddings', slots: 4, in_use: 0, external: 0 },
+        { model: 'qwen3.6-35b-a3b', group: 'taki-gpu', slots: 1, in_use: 1, external: 0 },
+      ],
+      groups: [
+        { name: 'taki-embeddings', slot_source: 'discovered', state: 'loaded', slots: 4, in_use: 0, external: 0 },
+        { name: 'taki-gpu', slot_source: 'config', state: 'loaded', slots: 1, in_use: 1, external: 0 },
+      ],
+    },
+  ],
+};
+
+// Each slot table row as its cells' text: [endpoint, status, slots, models, source].
+function slotTableRows(): string[][] {
+  const table = [...document.querySelectorAll('table')].at(-1)!;
+  return [...table.querySelectorAll('tbody tr')].map((row) =>
+    [...row.querySelectorAll('td')].map((td) => td.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
+  );
+}
+
 describe('QueuePanel slot groups', () => {
-  it('shows each group against its own limit', async () => {
+  it('gives each group its own row, labelled with its endpoint', async () => {
+    await renderWith(taki, () => expect(queue.data?.endpoints?.[0]?.name).toBe('Taki'));
+    expect(slotTableRows()).toEqual([
+      ['Taki (taki-embeddings)', '● Available', '● 0/ 4', 'nomic-embed-text-v1.5 0/4', 'discovered'],
+      ['Taki (taki-gpu)', '● Busy', '● 1/ 1', 'qwen3.6-35b-a3b 1/1', 'config'],
+    ]);
+  });
+
+  it('puts models outside every group on an "ungrouped" row', async () => {
     await renderWith(busy, () => expect(queue.data?.endpoints?.[0]?.groups?.length).toBe(1));
-    const g = document.querySelector('.group-slot');
-    expect(g?.textContent?.replace(/\s+/g, ' ').trim()).toBe('gpu 1/1');
-    expect(g?.classList.contains('is-full')).toBe(true);
-    expect(g?.getAttribute('title')).toContain('limit 1 from discovered');
+    expect(slotTableRows().map((r) => r.slice(0, 2))).toEqual([
+      ['gpu-box (gpu)', '● Busy'],
+      ['gpu-box (ungrouped)', '● Available'],
+    ]);
+  });
+
+  it('shows an endpoint without groups as one row under its own name', async () => {
+    const plain = structuredClone(taki);
+    plain.endpoints[0].groups = [];
+    await renderWith(plain, () => expect(queue.data?.endpoints?.[0]?.groups?.length).toBe(0));
+    expect(slotTableRows().map((r) => r.slice(0, 3))).toEqual([['Taki', '● Available', '● 1/ 5']]);
+  });
+
+  it('shows every row offline when the endpoint is down', async () => {
+    const down = structuredClone(taki);
+    down.endpoints[0].down = true;
+    await renderWith(down, () => expect(queue.data?.endpoints?.[0]?.down).toBe(true));
+    expect(slotTableRows().map((r) => r[1])).toEqual(['● Offline', '● Offline']);
+  });
+
+  it('shows a group with nothing loaded as cold', async () => {
+    const cold = structuredClone(taki);
+    cold.endpoints[0].groups[1] = { ...cold.endpoints[0].groups[1], state: 'cold', in_use: 0 };
+    await renderWith(cold, () => expect(queue.data?.endpoints?.[0]?.groups?.[1]?.state).toBe('cold'));
+    expect(slotTableRows().map((r) => r[1])).toEqual(['● Available', '● Cold']);
   });
 });
 

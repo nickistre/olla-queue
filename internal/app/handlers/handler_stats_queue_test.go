@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/thushan/olla/internal/adapter/balancer"
+	"github.com/thushan/olla/internal/core/domain"
 )
 
 func TestQueueStatsHandler(t *testing.T) {
@@ -70,5 +71,33 @@ func TestHashStatusResponse_QueueChangesETag(t *testing.T) {
 	}
 	if hashStatusResponse(&idle) == hashStatusResponse(&busy) {
 		t.Fatal("a change in queue depth must change the ETag")
+	}
+}
+
+// The queue only has the endpoint copy it last saw; the handler reports the
+// repository's live health instead.
+func TestQueueStatsHandler_OverlaysLiveHealth(t *testing.T) {
+	live := &domain.Endpoint{Name: "a", URLString: "http://a:1", Status: domain.StatusOffline}
+	app := &Application{
+		repository: &mockStatusEndpointRepository{endpoints: []*domain.Endpoint{live}},
+		queueStatsFn: func() *balancer.QueueStats {
+			return &balancer.QueueStats{Enabled: true, Endpoints: []balancer.QueueEndpointStats{
+				{Name: "a", URL: "http://a:1", Health: "healthy"},
+				{Name: "gone", URL: "http://gone:1", Health: "healthy"},
+			}}
+		},
+	}
+	w := httptest.NewRecorder()
+	app.queueStatsHandler(w, httptest.NewRequest(http.MethodGet, "/internal/stats/queue", nil))
+
+	var got balancer.QueueStats
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Endpoints[0].Health != "offline" {
+		t.Fatalf("a health = %q, want offline", got.Endpoints[0].Health)
+	}
+	if got.Endpoints[1].Health != "healthy" {
+		t.Fatalf("unknown endpoint keeps its own health, got %q", got.Endpoints[1].Health)
 	}
 }
