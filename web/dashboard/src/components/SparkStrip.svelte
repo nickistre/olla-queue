@@ -40,11 +40,14 @@
 
   const step = $derived(view.length >= 2 ? W / (view.length - 1) : 0);
   const maxReq = $derived(Math.max(1, ...view.map((s) => s.reqPerSec)));
-  const maxConn = $derived(Math.max(1, ...view.map((s) => s.activeConnections)));
   // The queue line only exists while the queue is on: a sample from a build or
   // config without it carries queueDepth null, which is not the same as 0.
   const hasQueue = $derived(view.some((s) => !s.error && s.queueDepth !== null));
-  const maxQueue = $derived(Math.max(1, ...view.map((s) => s.queueDepth ?? 0)));
+  // Conns and queued are both request counts, so they share one ceiling and
+  // their heights compare directly.
+  const maxCount = $derived(
+    Math.max(1, ...view.map((s) => Math.max(s.activeConnections, s.queueDepth ?? 0))),
+  );
 
   // Ceiling label for the req/s axis: one decimal under 10, integer above.
   const maxReqLabel = $derived(maxReq < 10 ? maxReq.toFixed(1) : Math.round(maxReq).toString());
@@ -114,8 +117,8 @@
 
   const reqAreaD = $derived(buildArea(view, maxReq));
   const reqEdgeD = $derived(buildLine(view, (s) => s.reqPerSec, maxReq));
-  const connLineD = $derived(buildLine(view, (s) => s.activeConnections, maxConn));
-  const queueLineD = $derived(hasQueue ? buildLine(view, (s) => s.queueDepth ?? 0, maxQueue) : '');
+  const connLineD = $derived(buildLine(view, (s) => s.activeConnections, maxCount));
+  const queueLineD = $derived(hasQueue ? buildLine(view, (s) => s.queueDepth ?? 0, maxCount) : '');
   const errorIndices = $derived(
     view.length >= 2
       ? view.map((s, i) => (s.error ? i : -1)).filter((i) => i >= 0)

@@ -435,6 +435,18 @@ describe('SparkStrip queue line', () => {
     expect(document.querySelector('.spark-chart')?.getAttribute('aria-label')).toContain('4 queued');
   });
 
+  it('scales conns and queued against one shared ceiling', () => {
+    render({
+      samples: [
+        makeSample({ activeConnections: 8, queueDepth: 2 }),
+        makeSample({ activeConnections: 8, queueDepth: 4 }),
+      ],
+    });
+    // Ceiling is 8, so 4 queued sits halfway up rather than at the top.
+    expect(document.querySelector('.spark-line')?.getAttribute('d')).toBe('M 0 0 L 100 0');
+    expect(document.querySelector('.spark-queue')?.getAttribute('d')).toBe('M 0 22.5 L 100 15');
+  });
+
   it('does not call a queue with waiters idle', () => {
     render({ samples: [makeSample({ queueDepth: 2 }), makeSample({ queueDepth: 3 })] });
     expect(document.body.textContent).not.toContain('no recent traffic');
