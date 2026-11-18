@@ -295,6 +295,7 @@ KV-cache affinity routing for multi-turn LLM conversations. See [Sticky Sessions
 | `sticky_sessions.max_sessions` | uint64 | `10000` | LRU capacity; oldest entry evicted when full |
 | `sticky_sessions.key_sources` | []string | `["session_header","prefix_hash","auth_header"]` | Ordered key source cascade; first match wins |
 | `sticky_sessions.prefix_hash_bytes` | int | `512` | Bytes of the messages field to hash for `prefix_hash` |
+| `sticky_sessions.hold_seconds` | int | `0` | With `proxy.queue` on: how long a request waits for its busy pinned backend (keeping its KV cache) before taking another. `0` = move at once. See [Hold for a busy sticky backend](../concepts/request-queue.md#hold-for-a-busy-sticky-backend) |
 
 **Environment Variable**: `OLLA_PROXY_STICKY_SESSIONS_ENABLED` (only `enabled` is exposed as an env var)
 
@@ -327,6 +328,7 @@ Caps in-flight requests per endpoint and holds the overflow in a FIFO queue unti
 | `queue.discover_slots` | bool | `true` | Read slot counts from llama.cpp `/props` and llama-swap's running models |
 | `queue.slot_refresh_interval` | duration | `30s` | How often discovered slot counts are refreshed |
 | `queue.track_external_load` | bool | `true` | Count slots a backend reports busy with other clients' traffic as taken (llama-swap `/api/events`, llama.cpp `/slots`). Needs `discover_slots` |
+| `queue.warm_first_max_wait` | duration | `10s` | Requests whose model is loaded run before ones that would load or swap a model, until a request has waited this long; then arrival order. `0` = strict arrival order |
 | `queue.busy_poll_interval` | duration | `1s` | How often llama.cpp `/slots` is read for external load; llama-swap is watched live instead |
 
 **Environment Variables**: `OLLA_PROXY_QUEUE_ENABLED`, `OLLA_PROXY_QUEUE_MAX_SIZE`, `OLLA_PROXY_QUEUE_TIMEOUT`

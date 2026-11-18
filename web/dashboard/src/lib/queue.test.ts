@@ -13,6 +13,8 @@ const waiter = (o: Partial<QueueWaiter> = {}): QueueWaiter => ({
   sticky_endpoint: '',
   wait_ms: 1234,
   candidates: 2,
+  holding: false,
+  cold: false,
   ...o,
 });
 

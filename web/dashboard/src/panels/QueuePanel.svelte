@@ -141,11 +141,14 @@
             {#if data.waits_completed > 0}{fmtMs(data.avg_wait_ms)}{:else}<span class="dash">—</span>{/if}
           {/snippet}
         </StatTile>
-        <StatTile
-          label="Dispatched"
-          value={fmtInt(data.dispatched)}
-          sub="of {fmtInt(data.enqueued)} queued"
-        />
+        <StatTile label="Dispatched" value={fmtInt(data.dispatched)}>
+          {#snippet subSnippet()}
+            of {fmtInt(data.enqueued)} queued{#if data.hold_seconds > 0}{' · '}<span
+                title="Requests that held for a busy pinned endpoint: kept it, or moved after {fmtDuration(data.hold_seconds * 1000)}"
+                >sticky {fmtInt(data.hold_kept)} kept / {fmtInt(data.hold_moved)} moved</span
+              >{/if}
+          {/snippet}
+        </StatTile>
         <StatTile label="Turned away" value={fmtInt(data.timed_out + data.rejected_full)}>
           {#snippet subSnippet()}
             {fmtInt(data.timed_out)} timed out · {fmtInt(data.rejected_full)} queue full{#if data.cancelled > 0}{' · '}{fmtInt(data.cancelled)} left{/if}
@@ -169,8 +172,12 @@
           {#snippet rowSnippet({ row: r, cellClass })}
             <td class={cellClass('position')}>{r.position}</td>
             <td class="col-sticky" title={r.user_agent || undefined}>{r.client_ip || '—'}</td>
-            <td class="cell-clip" title={r.model}>{r.model || '—'}</td>
-            <td>{#if r.sticky_label}<span class="pill">{r.sticky_label}</span>{:else}<span class="dash">—</span>{/if}</td>
+            <td class="cell-clip" title={r.model}>
+              {r.model || '—'}{#if r.cold}{' '}<span class="tag tag-cold" title="Not loaded on any endpoint it can use: running it means a load, perhaps a swap">cold</span>{/if}
+            </td>
+            <td>
+              {#if r.sticky_label}<span class="pill">{r.sticky_label}</span>{:else}<span class="dash">—</span>{/if}{#if r.holding}{' '}<span class="tag tag-hold" title="Waiting for its pinned endpoint to keep the conversation's KV cache, up to {fmtDuration(data.hold_seconds * 1000)}">holding</span>{/if}
+            </td>
             <td class={cellClass('enqueued_ms')}>{fmtClockTime(r.enqueued_at) || '—'}</td>
             <td class={cellClass('waited_ms')}>{fmtMs(r.waited_ms)}</td>
             <td class={cellClass('candidates')}>{fmtInt(r.candidates)}</td>
@@ -254,6 +261,18 @@
   }
   .group-slot {
     font-weight: 600;
+  }
+  .tag {
+    font-size: 0.66rem;
+    padding: 0 4px;
+    border: 1px solid currentColor;
+    border-radius: var(--radius-sm);
+  }
+  .tag-cold {
+    color: var(--blue);
+  }
+  .tag-hold {
+    color: var(--amber);
   }
   .model-slot.is-full {
     color: var(--amber);

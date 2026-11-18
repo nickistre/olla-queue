@@ -151,6 +151,32 @@ func (d *SlotDiscoverer) ModelSlots(ep *domain.Endpoint, model string) (int, boo
 	return 0, false
 }
 
+// ModelState implements SlotResolver. A single-model llama.cpp server serves
+// whatever it was started with, so it always counts as loaded; on a
+// multi-model node a model is loaded only if discovery saw it ready.
+func (d *SlotDiscoverer) ModelState(ep *domain.Endpoint, model string) ModelState {
+	if model == "" {
+		return ModelStateUnknown
+	}
+	d.mu.RLock()
+	ds, ok := d.discovered[ep.URLString]
+	d.mu.RUnlock()
+	if !ok {
+		return ModelStateUnknown
+	}
+	switch ds.kind {
+	case backendLlamaCpp:
+		return ModelStateLoaded
+	case backendLlamaSwap, backendRouter:
+		if _, loaded := ds.models[model]; loaded {
+			return ModelStateLoaded
+		}
+		return ModelStateCold
+	default:
+		return ModelStateUnknown
+	}
+}
+
 // GroupSlots implements SlotResolver: the group's max_concurrent, else the
 // slots of its loaded models, else the fallback. Summing only loaded models is
 // what makes a swap group behave: while qwen-a holds the group's one slot, a

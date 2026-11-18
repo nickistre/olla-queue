@@ -284,6 +284,10 @@ export interface QueueWaiter {
   sticky_endpoint: string;
   wait_ms: number;
   candidates: number;
+  // Waiting for its busy pinned endpoint (sticky hold) rather than moving.
+  holding: boolean;
+  // No candidate endpoint has the model loaded: running it means a load or swap.
+  cold: boolean;
 }
 
 export interface QueueStatsResponse {
@@ -295,6 +299,9 @@ export interface QueueStatsResponse {
   max_wait_ms: number;
   wait_total_ms: number;
   waits_completed: number;
+  hold_kept: number;
+  hold_moved: number;
+  hold_seconds: number;
   enqueued: number;
   dispatched: number;
   timed_out: number;

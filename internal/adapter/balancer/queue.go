@@ -46,7 +46,22 @@ type SlotResolver interface {
 	ModelSlotList(ep *domain.Endpoint) map[string]int
 	// GroupSlots is the limit for one of ep's slot_groups.
 	GroupSlots(ep *domain.Endpoint, group string) (slots int, source string)
+	// ModelState says whether model is loaded on ep, as far as is known.
+	ModelState(ep *domain.Endpoint, model string) ModelState
 }
+
+// ModelState is what is known about a model being resident on an endpoint.
+type ModelState int
+
+const (
+	// ModelStateUnknown: the backend does not say (Ollama, vLLM, ...).
+	ModelStateUnknown ModelState = iota
+	// ModelStateLoaded: running now; a request starts without a load.
+	ModelStateLoaded
+	// ModelStateCold: a multi-model node that would have to load (and maybe
+	// swap something out) first.
+	ModelStateCold
+)
 
 // slotGroupOf names the slot group model belongs to on ep: the first group
 // with a matching pattern, or "" when the endpoint has no group for it.
@@ -86,6 +101,8 @@ func (s staticSlots) Slots(ep *domain.Endpoint) (int, string) {
 func (staticSlots) ModelSlots(*domain.Endpoint, string) (int, bool) { return 0, false }
 func (staticSlots) ModelSlotList(*domain.Endpoint) map[string]int   { return nil }
 
+func (staticSlots) ModelState(*domain.Endpoint, string) ModelState { return ModelStateUnknown }
+
 func (s staticSlots) GroupSlots(ep *domain.Endpoint, group string) (int, string) {
 	if g, ok := slotGroupConfig(ep, group); ok && g.MaxConcurrent > 0 {
 		return g.MaxConcurrent, SlotSourceConfig
@@ -116,6 +133,11 @@ type queueWaiter struct {
 	caller     domain.QueueCaller // copied at enqueue for the stats listing
 	ready      chan queueResult   // buffered 1, written once under q.mu
 	elem       *list.Element      // nil once removed from the queue
+	// holdUntil ends the wait for a busy pinned endpoint (sticky hold); zero
+	// when holding is off. holdTimer wakes the queue at that moment, since no
+	// slot release may come along to re-evaluate the request.
+	holdUntil  time.Time
+	holdTimer  *time.Timer
 	stickyKey  string
 	candidates []*domain.Endpoint
 }
@@ -127,14 +149,18 @@ type queueWaiter struct {
 // endpoint and claiming capacity on it is one atomic step. The retry handler
 // always pairs a successful Select with exactly one DecrementConnections, which
 // is where the slot is released and the next waiter dispatched. There is no
-// dispatcher goroutine: dispatch runs on the two events that can make progress
-// possible (a slot freeing, or capacity growing).
+// dispatcher goroutine: dispatch runs on the events that can make progress
+// possible (a slot freeing, capacity growing, outside load easing, or a
+// sticky hold lapsing).
 type QueueWrapper struct {
 	inner    domain.EndpointSelector
 	resolver SlotResolver
 	// pinLookup maps sticky keys to pinned endpoint URLs for the stats
 	// listing. Optional: nil when sticky sessions are off.
 	pinLookup func(keys []string) map[string]string
+	// pinPeek resolves one sticky key to its pinned URL without touching the
+	// session; with holdFor > 0 it drives sticky hold. Optional.
+	pinPeek func(key string) (string, bool)
 	// modelOf names the model a request will run on ep. Aliases can map one
 	// requested name to different backend names per endpoint, so it is per
 	// endpoint. Defaults to the requested model from the context.
@@ -154,8 +180,9 @@ type QueueWrapper struct {
 	reservations map[*domain.Endpoint]reservation
 	known        map[string]*domain.Endpoint
 	waiters      list.List
-	cfg          config.QueueConfig
 	stats        queueCounters
+	cfg          config.QueueConfig
+	holdFor      time.Duration
 	mu           sync.Mutex
 	closed       bool
 }
@@ -173,6 +200,10 @@ type queueCounters struct {
 	// divisor for waitTotalNs. enqueued would over-count while some still wait.
 	waitsDone atomic.Uint64
 	peakDepth atomic.Int64
+	// holdKept counts queued requests that waited for and then got their
+	// pinned endpoint; holdMoved those that went elsewhere despite a pin.
+	holdKept  atomic.Uint64
+	holdMoved atomic.Uint64
 }
 
 // NewQueueWrapper wraps inner with a slot-limited request queue. A nil resolver
@@ -251,9 +282,18 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 		q.known[ep.URLString] = ep
 	}
 
-	// Taking a free slot straight away is always fair: every dispatch pass leaves
-	// no waiter with a free candidate, so any slot free now is one no waiter can use.
-	if free := q.freeLocked(ctx, endpoints); len(free) > 0 {
+	now := time.Now()
+	stickyKey, _ := ctx.Value(constants.ContextStickyKeyKey).(string)
+	var holdUntil time.Time
+	if q.holdFor > 0 && stickyKey != "" {
+		holdUntil = now.Add(q.holdFor)
+	}
+
+	// Taking a free slot straight away is always fair: every dispatch pass
+	// leaves no waiter able to use a free slot, so any slot this request can
+	// take now is one no waiter wants. A holding waiter only wants its pinned
+	// endpoint, which it gets first whenever that frees.
+	if free := q.admissibleLocked(ctx, endpoints, stickyKey, holdUntil, now); len(free) > 0 {
 		ep, err := q.reserveLocked(ctx, free)
 		q.mu.Unlock()
 		return ep, err
@@ -275,12 +315,18 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 		ctx:        ctx,
 		candidates: endpoints,
 		ready:      make(chan queueResult, 1),
-		enqueuedAt: time.Now(),
+		enqueuedAt: now,
+		stickyKey:  stickyKey,
+		holdUntil:  holdUntil,
 	}
 	if caller, ok := ctx.Value(constants.ContextQueueCallerKey).(*domain.QueueCaller); ok && caller != nil {
 		w.caller = *caller
 	}
-	w.stickyKey, _ = ctx.Value(constants.ContextStickyKeyKey).(string)
+	if !holdUntil.IsZero() {
+		// When the hold lapses the request may take any free endpoint, but a
+		// free one may already be sitting idle with no release coming.
+		w.holdTimer = time.AfterFunc(q.holdFor, q.Wake)
+	}
 	w.elem = q.waiters.PushBack(w)
 	depth := int64(q.waiters.Len())
 	q.mu.Unlock()
@@ -304,8 +350,7 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 
 	q.mu.Lock()
 	if w.elem != nil {
-		q.waiters.Remove(w.elem)
-		w.elem = nil
+		q.removeLocked(w)
 		q.mu.Unlock()
 		if errors.Is(waitErr, ErrQueueTimeout) {
 			q.stats.timedOut.Add(1)
@@ -352,6 +397,17 @@ func (q *QueueWrapper) recordWait(outcome *domain.QueueOutcome, waited time.Dura
 		outcome.Queued = true
 		outcome.Wait += waited
 	}
+}
+
+// SetStickyHold makes a request whose pinned endpoint is busy wait up to hold
+// for it instead of moving to another endpoint, which would lose the
+// conversation's KV cache. peek must not touch the session (no hit/miss, no
+// TTL slide). hold <= 0 turns holding off.
+func (q *QueueWrapper) SetStickyHold(peek func(key string) (string, bool), hold time.Duration) {
+	q.mu.Lock()
+	q.pinPeek = peek
+	q.holdFor = hold
+	q.mu.Unlock()
 }
 
 // SetPinLookup lets the stats listing show which endpoint each queued
@@ -472,22 +528,137 @@ func (q *QueueWrapper) Stop() {
 // that has a free candidate. A waiter whose candidates are all full is skipped
 // rather than blocking the line, so a request for a busy model never holds up
 // one for an idle model.
+//
+// With warm_first_max_wait set, the walk runs twice. The first pass serves
+// requests whose model is already loaded on an endpoint they can use, plus any
+// that have waited longer than the cap, in arrival order; the second serves
+// the rest. A request that would load or swap a model therefore lets warm ones
+// go first, so a swap is not forced while work for the loaded model waits,
+// but never for longer than the cap.
 func (q *QueueWrapper) dispatchLocked() {
+	now := time.Now()
+	if q.cfg.WarmFirstMaxWait > 0 {
+		q.dispatchPassLocked(now, func(w *queueWaiter, free []*domain.Endpoint) bool {
+			return now.Sub(w.enqueuedAt) >= q.cfg.WarmFirstMaxWait || q.anyLoadedLocked(w.ctx, free)
+		})
+	}
+	q.dispatchPassLocked(now, func(*queueWaiter, []*domain.Endpoint) bool { return true })
+}
+
+func (q *QueueWrapper) dispatchPassLocked(now time.Time, eligible func(*queueWaiter, []*domain.Endpoint) bool) {
 	for e := q.waiters.Front(); e != nil; {
 		next := e.Next()
 		w := waiterAt(e)
-		if free := q.freeLocked(w.ctx, w.candidates); len(free) > 0 {
+		if free := q.admissibleLocked(w.ctx, w.candidates, w.stickyKey, w.holdUntil, now); len(free) > 0 && eligible(w, free) {
 			ep, err := q.reserveLocked(w.ctx, free)
+			if err == nil {
+				q.countHoldLocked(w, ep)
+			}
 			q.completeLocked(w, queueResult{endpoint: ep, err: err})
 		}
 		e = next
 	}
 }
 
+// countHoldLocked records whether a queued request with a live pin got it.
+func (q *QueueWrapper) countHoldLocked(w *queueWaiter, got *domain.Endpoint) {
+	if w.holdUntil.IsZero() || q.pinPeek == nil {
+		return
+	}
+	pinned, ok := q.pinPeek(w.stickyKey)
+	if !ok {
+		return
+	}
+	if pinned == got.URLString {
+		q.stats.holdKept.Add(1)
+	} else {
+		q.stats.holdMoved.Add(1)
+	}
+}
+
 func (q *QueueWrapper) completeLocked(w *queueWaiter, res queueResult) {
+	q.removeLocked(w)
+	w.ready <- res
+}
+
+func (q *QueueWrapper) removeLocked(w *queueWaiter) {
 	q.waiters.Remove(w.elem)
 	w.elem = nil
-	w.ready <- res
+	if w.holdTimer != nil {
+		w.holdTimer.Stop()
+	}
+}
+
+// admissibleLocked is freeLocked plus sticky hold: while a request's hold
+// lasts and its pinned endpoint is one of its candidates, that endpoint is
+// the only one it will take. Once the hold lapses, or the pin is gone or
+// points at an endpoint this request cannot use, any free candidate will do.
+func (q *QueueWrapper) admissibleLocked(ctx context.Context, candidates []*domain.Endpoint, stickyKey string, holdUntil, now time.Time) []*domain.Endpoint {
+	free := q.freeLocked(ctx, candidates)
+	if holdUntil.IsZero() || !now.Before(holdUntil) || q.pinPeek == nil {
+		return free
+	}
+	pinned, ok := q.pinPeek(stickyKey)
+	if !ok {
+		return free
+	}
+	pinnedIsCandidate := false
+	for _, ep := range candidates {
+		if ep.URLString == pinned && ep.Status.IsRoutable() {
+			pinnedIsCandidate = true
+			break
+		}
+	}
+	if !pinnedIsCandidate {
+		return free
+	}
+	for _, ep := range free {
+		if ep.URLString == pinned {
+			return []*domain.Endpoint{ep}
+		}
+	}
+	return nil // pinned endpoint busy: wait for it
+}
+
+// anyLoadedLocked reports whether the request's model is loaded on one of
+// endpoints.
+func (q *QueueWrapper) anyLoadedLocked(ctx context.Context, endpoints []*domain.Endpoint) bool {
+	for _, ep := range endpoints {
+		if q.resolver.ModelState(ep, q.modelOf(ctx, ep)) == ModelStateLoaded {
+			return true
+		}
+	}
+	return false
+}
+
+// preferLoadedLocked narrows free endpoints to the best tier for this request:
+// ones with its model loaded, else ones that do not report (Ollama and the
+// like), else cold ones that would load or swap. The configured strategy then
+// picks within the tier, so priority and connection balancing still apply.
+func (q *QueueWrapper) preferLoadedLocked(ctx context.Context, free []*domain.Endpoint) []*domain.Endpoint {
+	if len(free) < 2 {
+		return free
+	}
+	var loaded, unknown []*domain.Endpoint
+	for _, ep := range free {
+		switch q.resolver.ModelState(ep, q.modelOf(ctx, ep)) {
+		case ModelStateLoaded:
+			loaded = append(loaded, ep)
+		case ModelStateUnknown:
+			unknown = append(unknown, ep)
+		case ModelStateCold:
+			// Last resort: only chosen when every free endpoint is cold, via
+			// the fall-through to free below.
+		}
+	}
+	switch {
+	case len(loaded) > 0:
+		return loaded
+	case len(unknown) > 0:
+		return unknown
+	default:
+		return free
+	}
 }
 
 // reserveLocked lets the inner strategy pick among free endpoints, then claims
@@ -497,7 +668,7 @@ func (q *QueueWrapper) completeLocked(w *queueWaiter, res queueResult) {
 // pointers. The proxy path identifies endpoints by name and URL, never by
 // pointer, so the copy is otherwise indistinguishable.
 func (q *QueueWrapper) reserveLocked(ctx context.Context, free []*domain.Endpoint) (*domain.Endpoint, error) {
-	ep, err := q.inner.Select(ctx, free)
+	ep, err := q.inner.Select(ctx, q.preferLoadedLocked(ctx, free))
 	if err != nil {
 		return nil, err
 	}
@@ -625,6 +796,38 @@ func (q *QueueWrapper) modelStatsLocked(ep *domain.Endpoint) []QueueModelStats {
 	return out
 }
 
+// holdingLocked reports whether w is waiting for its busy pinned endpoint.
+func (q *QueueWrapper) holdingLocked(w *queueWaiter, now time.Time) bool {
+	if w.holdUntil.IsZero() || !now.Before(w.holdUntil) || q.pinPeek == nil {
+		return false
+	}
+	pinned, ok := q.pinPeek(w.stickyKey)
+	if !ok {
+		return false
+	}
+	for _, ep := range w.candidates {
+		if ep.URLString == pinned {
+			return true
+		}
+	}
+	return false
+}
+
+// coldLocked reports whether no candidate endpoint has w's model loaded and at
+// least one would have to load it.
+func (q *QueueWrapper) coldLocked(w *queueWaiter) bool {
+	cold := false
+	for _, ep := range w.candidates {
+		switch q.resolver.ModelState(ep, q.modelOf(w.ctx, ep)) {
+		case ModelStateLoaded, ModelStateUnknown:
+			return false
+		case ModelStateCold:
+			cold = true
+		}
+	}
+	return cold
+}
+
 // groupStatsLocked lists ep's configured slot groups in config order.
 func (q *QueueWrapper) groupStatsLocked(ep *domain.Endpoint) []QueueGroupStats {
 	out := make([]QueueGroupStats, 0, len(ep.SlotGroups))
@@ -702,6 +905,12 @@ type QueueWaiterStats struct {
 	StickyEndpoint string  `json:"sticky_endpoint"`
 	WaitMs         float64 `json:"wait_ms"`
 	Candidates     int     `json:"candidates"`
+	// Holding is true while the request waits for its busy pinned endpoint
+	// (sticky hold) rather than taking another.
+	Holding bool `json:"holding"`
+	// Cold is true when none of its candidate endpoints has the model loaded,
+	// so running it means a load, perhaps a swap.
+	Cold bool `json:"cold"`
 }
 
 // QueueStats is a point-in-time snapshot of queue activity.
@@ -715,16 +924,21 @@ type QueueStats struct {
 	// derive the mean wait over any window from two samples.
 	WaitTotalMs    float64 `json:"wait_total_ms"`
 	WaitsCompleted uint64  `json:"waits_completed"`
-	Enqueued       uint64  `json:"enqueued"`
-	Dispatched     uint64  `json:"dispatched"`
-	TimedOut       uint64  `json:"timed_out"`
-	RejectedFull   uint64  `json:"rejected_full"`
-	Cancelled      uint64  `json:"cancelled"`
-	Failed         uint64  `json:"failed"`
-	Depth          int     `json:"depth"`
-	PeakDepth      int     `json:"peak_depth"`
-	MaxSize        int     `json:"max_size"`
-	Enabled        bool    `json:"enabled"`
+	// HoldKept and HoldMoved count queued requests with a live sticky pin
+	// that got their pinned endpoint, or went elsewhere after the hold.
+	HoldKept     uint64  `json:"hold_kept"`
+	HoldMoved    uint64  `json:"hold_moved"`
+	HoldSeconds  float64 `json:"hold_seconds"`
+	Enqueued     uint64  `json:"enqueued"`
+	Dispatched   uint64  `json:"dispatched"`
+	TimedOut     uint64  `json:"timed_out"`
+	RejectedFull uint64  `json:"rejected_full"`
+	Cancelled    uint64  `json:"cancelled"`
+	Failed       uint64  `json:"failed"`
+	Depth        int     `json:"depth"`
+	PeakDepth    int     `json:"peak_depth"`
+	MaxSize      int     `json:"max_size"`
+	Enabled      bool    `json:"enabled"`
 }
 
 // Stats returns a snapshot of queue counters, per-endpoint slot usage and the
@@ -762,6 +976,8 @@ func (q *QueueWrapper) Stats() QueueStats {
 			EnqueuedAt: w.enqueuedAt,
 			WaitMs:     float64(now.Sub(w.enqueuedAt)) / float64(time.Millisecond),
 			Candidates: len(w.candidates),
+			Holding:    q.holdingLocked(w, now),
+			Cold:       q.coldLocked(w),
 		})
 		keys = append(keys, w.stickyKey)
 	}
@@ -803,6 +1019,9 @@ func (q *QueueWrapper) Stats() QueueStats {
 		MaxWaitMs:      float64(q.stats.waitMaxNs.Load()) / float64(time.Millisecond),
 		WaitTotalMs:    float64(waitTotalNs) / float64(time.Millisecond),
 		WaitsCompleted: done,
+		HoldKept:       q.stats.holdKept.Load(),
+		HoldMoved:      q.stats.holdMoved.Load(),
+		HoldSeconds:    q.holdFor.Seconds(),
 		Endpoints:      eps,
 		Waiting:        waiting,
 	}

@@ -283,6 +283,7 @@ func (f fixedSlots) Slots(ep *domain.Endpoint) (int, string) {
 func (fixedSlots) ModelSlots(*domain.Endpoint, string) (int, bool)   { return 0, false }
 func (fixedSlots) ModelSlotList(*domain.Endpoint) map[string]int     { return nil }
 func (fixedSlots) GroupSlots(*domain.Endpoint, string) (int, string) { return 1, SlotSourceDefault }
+func (fixedSlots) ModelState(*domain.Endpoint, string) ModelState    { return ModelStateUnknown }
 
 func TestQueue_WakeAfterCapacityGrows(t *testing.T) {
 	slots := fixedSlots{"http://a:1": 1}
@@ -416,9 +417,25 @@ func TestQueue_StatsListsWaitersWithCallerAndPin(t *testing.T) {
 // modelSlots is a resolver with an endpoint-wide limit plus per-model limits,
 // like a llama-swap node running several models.
 type modelSlots struct {
-	models   map[string]int
-	groups   map[string]int
+	models map[string]int
+	groups map[string]int
+	// loaded, when set, lists models reported loaded per endpoint URL;
+	// anything else on that URL reads as cold. Unset: everything unknown.
+	loaded   map[string][]string
 	endpoint int
+}
+
+func (m modelSlots) ModelState(ep *domain.Endpoint, model string) ModelState {
+	list, ok := m.loaded[ep.URLString]
+	if !ok {
+		return ModelStateUnknown
+	}
+	for _, l := range list {
+		if l == model {
+			return ModelStateLoaded
+		}
+	}
+	return ModelStateCold
 }
 
 func (m modelSlots) Slots(*domain.Endpoint) (int, string) { return m.endpoint, SlotSourceDiscovered }

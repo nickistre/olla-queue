@@ -52,6 +52,10 @@ sequenceDiagram
     end
 ```
 
+## Waiting for a busy backend
+
+On its own, a sticky session moves to another backend when its pinned one is unavailable. With the [request queue](request-queue.md) enabled, a busy backend is also full: by default the request moves straight to a free backend and the pin moves with it. Set `hold_seconds` to have it wait for its own backend first, keeping the KV cache. See [Hold for a busy sticky backend](request-queue.md#hold-for-a-busy-sticky-backend).
+
 ## Key sources
 
 The `key_sources` list is evaluated in order; the first source that produces a non-empty value wins. All keys are scoped to the model name so the same client talking to different models maintains independent session state.

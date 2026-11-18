@@ -106,6 +106,7 @@ func DefaultConfig() *Config {
 				SlotRefreshInterval: 30 * time.Second,
 				TrackExternalLoad:   true,
 				BusyPollInterval:    time.Second,
+				WarmFirstMaxWait:    10 * time.Second,
 			},
 		},
 		Discovery: DiscoveryConfig{
@@ -587,6 +588,12 @@ func (c *Config) validateQueue() error {
 	}
 	if q.DiscoverSlots && q.SlotRefreshInterval <= 0 {
 		return errors.New("proxy.queue.slot_refresh_interval must be > 0 when discover_slots is enabled (prevents ticker panic)")
+	}
+	if q.WarmFirstMaxWait < 0 {
+		return fmt.Errorf("proxy.queue.warm_first_max_wait must be >= 0 (0 = strict arrival order), got %s", q.WarmFirstMaxWait)
+	}
+	if s := c.Proxy.StickySessions.HoldSeconds; s < 0 {
+		return fmt.Errorf("proxy.sticky_sessions.hold_seconds must be >= 0 (0 = never wait), got %d", s)
 	}
 	if q.TrackExternalLoad && q.BusyPollInterval <= 0 {
 		return errors.New("proxy.queue.busy_poll_interval must be > 0 when track_external_load is enabled (prevents ticker panic)")

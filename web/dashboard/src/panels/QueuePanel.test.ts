@@ -29,6 +29,9 @@ const busy = {
   peak_depth: 5,
   max_size: 100,
   timeout_seconds: 60,
+  hold_seconds: 30,
+  hold_kept: 4,
+  hold_moved: 1,
   avg_wait_ms: 800,
   max_wait_ms: 2400,
   waits_completed: 9,
@@ -47,6 +50,8 @@ const busy = {
       enqueued_at: new Date(Date.now() - 3000).toISOString(),
       wait_ms: 3000,
       candidates: 2,
+      holding: true,
+      cold: false,
     },
     {
       request_id: 'req-b',
@@ -57,6 +62,8 @@ const busy = {
       enqueued_at: new Date(Date.now() - 1000).toISOString(),
       wait_ms: 1000,
       candidates: 1,
+      holding: false,
+      cold: true,
     },
   ],
   endpoints: [
@@ -136,5 +143,17 @@ describe('QueuePanel slot groups', () => {
     expect(g?.textContent?.replace(/\s+/g, ' ').trim()).toBe('gpu 1/1');
     expect(g?.classList.contains('is-full')).toBe(true);
     expect(g?.getAttribute('title')).toContain('limit 1 from discovered');
+  });
+});
+
+describe('QueuePanel stage 2 tags', () => {
+  it('tags a holding request and a cold one, and shows hold counters', async () => {
+    await renderWith(busy, () => expect(queue.data?.hold_kept).toBe(4));
+    const rows = [...document.querySelectorAll('tbody tr')];
+    expect(rows[0].querySelector('.tag-hold')?.textContent).toBe('holding');
+    expect(rows[0].querySelector('.tag-cold')).toBeNull();
+    expect(rows[1].querySelector('.tag-cold')?.textContent).toBe('cold');
+    expect(rows[1].querySelector('.tag-hold')).toBeNull();
+    expect(document.body.textContent).toContain('sticky 4 kept / 1 moved');
   });
 });

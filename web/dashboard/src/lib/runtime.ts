@@ -216,6 +216,8 @@ export const parseQueue = guarded((raw: unknown): QueueStatsResponse | null => {
     sticky_endpoint: str(w.sticky_endpoint),
     wait_ms: num(w.wait_ms),
     candidates: num(w.candidates),
+    holding: w.holding === true,
+    cold: w.cold === true,
   }));
   return {
     enabled: raw.enabled,
@@ -226,6 +228,9 @@ export const parseQueue = guarded((raw: unknown): QueueStatsResponse | null => {
     max_wait_ms: num(raw.max_wait_ms),
     wait_total_ms: num(raw.wait_total_ms),
     waits_completed: num(raw.waits_completed),
+    hold_kept: num(raw.hold_kept),
+    hold_moved: num(raw.hold_moved),
+    hold_seconds: num(raw.hold_seconds),
     enqueued: num(raw.enqueued),
     dispatched: num(raw.dispatched),
     timed_out: num(raw.timed_out),

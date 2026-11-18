@@ -1696,6 +1696,14 @@ func TestQueueConfig_Validate(t *testing.T) {
 		{name: "slot group negative max_concurrent", wantErr: true, modify: func(c *Config) {
 			c.Discovery.Static.Endpoints[0].SlotGroups = []SlotGroupConfig{{Name: "gpu", Models: []string{"*"}, MaxConcurrent: -1}}
 		}},
+		{name: "negative warm_first_max_wait", wantErr: true, modify: func(c *Config) {
+			c.Proxy.Queue.Enabled = true
+			c.Proxy.Queue.WarmFirstMaxWait = -time.Second
+		}},
+		{name: "negative sticky hold", wantErr: true, modify: func(c *Config) {
+			c.Proxy.Queue.Enabled = true
+			c.Proxy.StickySessions.HoldSeconds = -1
+		}},
 		{name: "invalid values ignored while disabled", modify: func(c *Config) { c.Proxy.Queue.MaxSize = 0 }},
 		{name: "negative max_concurrent", wantErr: true, modify: func(c *Config) {
 			c.Discovery.Static.Endpoints[0].MaxConcurrent = -1

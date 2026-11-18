@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/thushan/olla/internal/config"
 	"github.com/thushan/olla/internal/core/constants"
 	"github.com/thushan/olla/internal/core/domain"
@@ -32,7 +33,12 @@ type StickyOutcome = domain.StickyOutcome
 type StickySessionWrapper struct {
 	inner domain.EndpointSelector
 	store *ttlcache.Cache[string, string]
-	cfg   config.StickySessionConfig
+	// pins mirrors store's key -> URL so the request queue can look a pin up
+	// on every dispatch pass without store.Get, which would count a hit or
+	// miss in the sticky stats and slide the session's TTL. store.Has (no side
+	// effects) still decides whether a pin is live; see Peek.
+	pins *xsync.Map[string, string]
+	cfg  config.StickySessionConfig
 }
 
 // NewStickySessionWrapper wraps inner with sticky session affinity using cfg.
@@ -51,11 +57,30 @@ func NewStickySessionWrapper(inner domain.EndpointSelector, cfg config.StickySes
 		ttlcache.WithCapacity[string, string](cfg.MaxSessions),
 	)
 
-	return &StickySessionWrapper{
+	s := &StickySessionWrapper{
 		inner: inner,
 		store: store,
+		pins:  xsync.NewMap[string, string](),
 		cfg:   cfg,
 	}
+	// Eviction callbacks run asynchronously, so a key may have been pinned
+	// again by the time this runs; only drop the mirror entry if the store no
+	// longer has it. Losing a race here only costs one hold, never a wrong pin.
+	store.OnEviction(func(_ context.Context, _ ttlcache.EvictionReason, item *ttlcache.Item[string, string]) {
+		if !store.Has(item.Key()) {
+			s.pins.Delete(item.Key())
+		}
+	})
+	return s
+}
+
+// Peek returns the backend key is pinned to without touching the session:
+// no hit/miss is recorded and the idle TTL does not slide.
+func (s *StickySessionWrapper) Peek(key string) (string, bool) {
+	if key == "" || !s.store.Has(key) {
+		return "", false
+	}
+	return s.pins.Load(key)
 }
 
 // Start launches the ttlcache background goroutine that handles TTL expiry and
@@ -126,6 +151,7 @@ func (s *StickySessionWrapper) Select(ctx context.Context, endpoints []*domain.E
 
 	// Record the affinity mapping for future turns.
 	s.store.Set(key, chosen.URLString, ttlcache.DefaultTTL)
+	s.pins.Store(key, chosen.URLString)
 
 	result := "miss"
 	if item != nil {
@@ -142,26 +168,14 @@ func (s *StickySessionWrapper) Select(ctx context.Context, endpoints []*domain.E
 }
 
 // PinnedURLs returns the backend each of keys is pinned to, omitting keys with
-// no live pin. It walks the store with Range rather than calling Get per key:
-// Get would count as a hit or miss in the sticky stats and slide the TTL, and
-// a dashboard looking at the queue must not change either.
+// no live pin. Like Peek, it leaves the sticky stats and TTLs untouched.
 func (s *StickySessionWrapper) PinnedURLs(keys []string) map[string]string {
-	want := make(map[string]struct{}, len(keys))
+	pins := make(map[string]string, len(keys))
 	for _, k := range keys {
-		if k != "" {
-			want[k] = struct{}{}
+		if url, ok := s.Peek(k); ok {
+			pins[k] = url
 		}
 	}
-	pins := make(map[string]string, len(want))
-	if len(want) == 0 {
-		return pins
-	}
-	s.store.Range(func(item *ttlcache.Item[string, string]) bool {
-		if _, ok := want[item.Key()]; ok {
-			pins[item.Key()] = item.Value()
-		}
-		return len(pins) < len(want)
-	})
 	return pins
 }
 

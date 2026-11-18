@@ -91,6 +91,42 @@ Discovered counts refresh every `queue.slot_refresh_interval`. A failed probe ke
 
 For backends that can't be probed (Ollama, vLLM, SGLang and others), set `max_concurrent` to match the backend's own concurrency, for example `OLLAMA_NUM_PARALLEL`.
 
+## Choosing what runs next
+
+When a slot frees, or a new request arrives, three rules decide which request runs and where.
+
+### Hold for a busy sticky backend
+
+With [sticky sessions](sticky-sessions.md) on, each conversation is pinned to the backend holding its KV cache. Normally, if that backend is busy and another is free, the request goes to the free one and the pin moves, so the cache is lost and the next turn starts cold. Set `proxy.sticky_sessions.hold_seconds` to make the request wait for its own backend instead:
+
+```yaml
+proxy:
+  sticky_sessions:
+    enabled: true
+    hold_seconds: 30   # 0 (default) = move at once
+```
+
+- A request waits up to `hold_seconds` for its pinned backend, then takes any free one.
+- This applies to new requests as well as queued ones. A new request whose pinned backend is busy queues even if other backends are free.
+- A pin that has expired (`idle_ttl_seconds`), or that points at a backend unable to serve this request, causes no hold.
+- Looking up the pin doesn't count as sticky traffic and doesn't extend the session.
+
+The Queue tab tags a holding request **holding**. Its Dispatched tile counts how many holds **kept** their backend and how many **moved** after the hold ran out.
+
+### Loaded models first
+
+`proxy.queue.warm_first_max_wait` (default `10s`) reorders the queue so a swap isn't forced while work for the loaded model is waiting. Requests whose model is already loaded on a backend they can use run before requests that would load or swap a model.
+
+- Among requests of the same kind, order is still arrival order.
+- A request that has waited longer than `warm_first_max_wait` is served strictly in arrival order, so a request needing a swap can't starve.
+- Set it to `0` for strict arrival order.
+
+The Queue tab tags such requests **cold**: no backend they can use has their model loaded.
+
+### Prefer a backend with the model loaded
+
+When several backends have room, the request goes to one with its model already loaded. Next come backends that don't report what they have loaded (Ollama, vLLM and others), and last ones that would have to load the model. The configured `load_balancer` (priority, least connections, round robin) then picks among that set.
+
 ## Traffic from other clients
 
 Olla counts its own requests against each limit, but a backend may also be serving clients that never pass through this Olla, such as another Olla instance or a script calling it directly. Without knowing that, Olla sees a slot as free while the backend is busy. The request then queues inside the backend, out of sight, and can run past `response_header_timeout`.

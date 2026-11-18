@@ -372,6 +372,9 @@ func (s *ProxyServiceWrapper) applyQueue() {
 	})
 	if s.stickyWrapper != nil {
 		qw.SetPinLookup(s.stickyWrapper.PinnedURLs)
+		if hold := s.config.StickySessions.HoldSeconds; hold > 0 {
+			qw.SetStickyHold(s.stickyWrapper.Peek, time.Duration(hold)*time.Second)
+		}
 	}
 	s.queueWrapper = qw
 	s.loadBalancer = qw

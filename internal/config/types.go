@@ -234,8 +234,13 @@ type StickySessionConfig struct {
 	IdleTTLSeconds int      `yaml:"idle_ttl_seconds"`
 	// PrefixHashBytes is how many leading bytes of the messages field to hash.
 	// Larger values increase hash uniqueness at the cost of slightly more CPU per request.
-	PrefixHashBytes int  `yaml:"prefix_hash_bytes"`
-	Enabled         bool `yaml:"enabled"`
+	PrefixHashBytes int `yaml:"prefix_hash_bytes"`
+	// HoldSeconds is how long a queued request waits for its pinned backend
+	// when that backend is busy, before taking any free one and moving the
+	// pin. Waiting keeps the conversation's KV cache; 0 = never wait. Only
+	// applies when proxy.queue is enabled.
+	HoldSeconds int  `yaml:"hold_seconds"`
+	Enabled     bool `yaml:"enabled"`
 }
 
 // QueueConfig controls request queuing when every candidate endpoint is at its
@@ -250,6 +255,11 @@ type QueueConfig struct {
 	// SlotRefreshInterval controls how often slot counts are re-read from
 	// llama.cpp /props (or llama-swap's running models).
 	SlotRefreshInterval time.Duration `yaml:"slot_refresh_interval"`
+	// WarmFirstMaxWait lets requests whose model is already loaded go ahead of
+	// ones that would load or swap a model, for up to this long: a request
+	// that has waited this long is served in arrival order regardless. 0 =
+	// strict arrival order.
+	WarmFirstMaxWait time.Duration `yaml:"warm_first_max_wait"`
 	// BusyPollInterval is how often llama.cpp /slots is read to see slots busy
 	// with traffic that did not come through this Olla. llama-swap nodes are
 	// watched live through /api/events instead and ignore it.
