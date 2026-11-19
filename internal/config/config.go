@@ -591,6 +591,12 @@ func (c *Config) validateQueue() error {
 		if err := c.validateQueueAfter(ep); err != nil {
 			return err
 		}
+		if ep.SlotRefreshInterval < 0 {
+			return fmt.Errorf("endpoint %q slot_refresh_interval must be >= 0 (0 = proxy.queue.slot_refresh_interval), got %s", ep.Name, ep.SlotRefreshInterval)
+		}
+		if ep.DiscoverSlots != nil && *ep.DiscoverSlots && c.Proxy.Queue.Enabled && !c.Proxy.Queue.DiscoverSlots {
+			return fmt.Errorf("endpoint %q discover_slots: true needs proxy.queue.discover_slots; per endpoint it can only turn discovery off", ep.Name)
+		}
 	}
 
 	q := c.Proxy.Queue

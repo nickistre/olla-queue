@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/thushan/olla/internal/core/domain"
 )
@@ -297,5 +298,76 @@ func TestSlotDiscoverer_GroupSlotsFromLoadedMembers(t *testing.T) {
 		if n, src := d.GroupSlots(ep, group); n != want.slots || src != want.source {
 			t.Errorf("group %s = %d/%s, want %d/%s", group, n, src, want.slots, want.source)
 		}
+	}
+}
+
+// countingProps serves llama.cpp /props and counts the probes per endpoint.
+func countingProps(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/props" {
+			hits.Add(1)
+			_, _ = w.Write([]byte(`{"total_slots": 2}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+func TestSlotDiscoverer_PerEndpointRefreshInterval(t *testing.T) {
+	fastSrv, fastHits := countingProps(t)
+	slowSrv, slowHits := countingProps(t)
+	fast := probeEndpoint("fast", "llamacpp", fastSrv.URL)
+	slow := probeEndpoint("slow", "llamacpp", slowSrv.URL)
+	slow.SlotRefreshInterval = 5 * time.Minute
+	d := NewSlotDiscoverer(staticEndpoints(fast, slow), 1, 30*time.Second, nil)
+	ctx := context.Background()
+
+	t0 := time.Now()
+	if next := d.refreshDue(ctx, t0); next != 30*time.Second {
+		t.Fatalf("first pass: next = %s, want the queue-wide 30s", next)
+	}
+	// 31s on: fast is due again, slow is not.
+	next := d.refreshDue(ctx, t0.Add(31*time.Second))
+	if fastHits.Load() != 2 || slowHits.Load() != 1 {
+		t.Fatalf("probes at 31s: fast=%d slow=%d", fastHits.Load(), slowHits.Load())
+	}
+	if next > 30*time.Second {
+		t.Fatalf("next = %s, want at most 30s", next)
+	}
+	d.refreshDue(ctx, t0.Add(5*time.Minute+time.Second))
+	if slowHits.Load() != 2 {
+		t.Fatalf("slow endpoint not probed after its own interval: %d", slowHits.Load())
+	}
+}
+
+func TestSlotDiscoverer_ShorterEndpointIntervalWakesSooner(t *testing.T) {
+	srv, _ := countingProps(t)
+	ep := probeEndpoint("quick", "llamacpp", srv.URL)
+	ep.SlotRefreshInterval = 5 * time.Second
+	d := NewSlotDiscoverer(staticEndpoints(ep), 1, 30*time.Second, nil)
+	if next := d.refreshDue(context.Background(), time.Now()); next != 5*time.Second {
+		t.Fatalf("next = %s, want the endpoint's 5s", next)
+	}
+}
+
+func TestSlotDiscoverer_DisabledEndpointIsNeverProbed(t *testing.T) {
+	srv, hits := countingProps(t)
+	ep := probeEndpoint("remote", "openai-compatible", srv.URL)
+	ep.NoSlotDiscovery = true
+	d := NewSlotDiscoverer(staticEndpoints(ep), 3, 30*time.Second, nil)
+	ctx := context.Background()
+
+	d.Refresh(ctx)
+	d.refreshDue(ctx, time.Now())
+	d.RefreshEndpoint(ctx, ep)
+	if hits.Load() != 0 {
+		t.Fatalf("disabled endpoint probed %d times", hits.Load())
+	}
+	if n, src := d.Slots(ep); n != 3 || src != SlotSourceDefault {
+		t.Fatalf("got %d/%s, want the default 3", n, src)
 	}
 }

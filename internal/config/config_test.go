@@ -1733,6 +1733,21 @@ func TestQueueConfig_Validate(t *testing.T) {
 			c.Proxy.Queue.Enabled = true
 			c.Discovery.Static.Endpoints[0].QueueAfter = time.Second
 		}},
+		{name: "negative endpoint slot_refresh_interval", wantErr: true, modify: func(c *Config) {
+			c.Discovery.Static.Endpoints[0].SlotRefreshInterval = -time.Second
+		}},
+		{name: "endpoint discover_slots on with queue-wide off", wantErr: true, modify: func(c *Config) {
+			on := true
+			c.Proxy.Queue.Enabled = true
+			c.Proxy.Queue.DiscoverSlots = false
+			c.Discovery.Static.Endpoints[0].DiscoverSlots = &on
+		}},
+		{name: "endpoint discover_slots off with its own interval", modify: func(c *Config) {
+			off := false
+			c.Proxy.Queue.Enabled = true
+			c.Discovery.Static.Endpoints[0].DiscoverSlots = &off
+			c.Discovery.Static.Endpoints[0].SlotRefreshInterval = 5 * time.Minute
+		}},
 		{name: "negative sticky hold", wantErr: true, modify: func(c *Config) {
 			c.Proxy.Queue.Enabled = true
 			c.Proxy.StickySessions.HoldSeconds = -1

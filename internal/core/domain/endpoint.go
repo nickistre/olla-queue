@@ -63,7 +63,12 @@ type Endpoint struct {
 	MaxConcurrent int
 	// QueueAfter is how long a request must have waited in the queue before it
 	// may use this endpoint; 0 = no delay.
-	QueueAfter          time.Duration
+	QueueAfter time.Duration
+	// SlotRefreshInterval overrides the queue-wide slot discovery interval;
+	// 0 = the queue-wide value.
+	SlotRefreshInterval time.Duration
+	// NoSlotDiscovery turns slot discovery off for this endpoint.
+	NoSlotDiscovery     bool
 	ConsecutiveFailures int
 	BackoffMultiplier   int
 	PreservePath        bool

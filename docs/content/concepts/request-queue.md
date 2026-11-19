@@ -87,7 +87,7 @@ discovery:
 
 The model name is the one the backend serves. If an [alias](model-aliases.md) maps to different names on different endpoints, each endpoint's limit is looked up under its own name.
 
-Discovered counts refresh every `queue.slot_refresh_interval`. A failed probe keeps the last known value. When a model is unloaded, its limit is dropped on the next refresh. If nothing is loaded, the endpoint falls back to `default_slots` rather than 0. When a refresh finds more slots, waiting requests are dispatched straight away.
+Discovered counts refresh every `queue.slot_refresh_interval`. An endpoint can set its own `slot_refresh_interval`, or turn discovery off with `discover_slots: false`. Turning it off is useful for an endpoint that would only answer the probes with errors, such as a hosted service; it then uses `max_concurrent` or `default_slots`, and gets no [external load](#traffic-from-other-clients) tracking. A failed probe keeps the last known value. When a model is unloaded, its limit is dropped on the next refresh. If nothing is loaded, the endpoint falls back to `default_slots` rather than 0. When a refresh finds more slots, waiting requests are dispatched straight away.
 
 For backends that can't be probed (Ollama, vLLM, SGLang and others), set `max_concurrent` to match the backend's own concurrency, for example `OLLAMA_NUM_PARALLEL`.
 
@@ -156,6 +156,7 @@ discovery:
           token: "${SPILL_API_KEY}"
         max_concurrent: 2
         queue_after: 5m
+        discover_slots: false   # nothing to discover on a hosted service
 
 proxy:
   queue:
@@ -170,6 +171,7 @@ proxy:
 - A sticky pin to an overflow endpoint doesn't hold a new request there, so a conversation's next turn returns to a local backend.
 - If the remote service names the model differently, map it with a [model alias](model-aliases.md).
 - `queue_after` needs `proxy.queue.enabled`, and must be shorter than `proxy.queue.timeout`. Both are checked at startup.
+- A hosted service can't report slots. Set `discover_slots: false` on it so the queue doesn't probe it every `slot_refresh_interval`.
 
 The Queue tab tags an overflow endpoint **after 5m** (its delay).
 

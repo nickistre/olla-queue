@@ -80,11 +80,14 @@ type SlotDiscoverer struct {
 	// lastSeen holds the endpoint each discovered URL was probed through, so
 	// the BusyTracker reuses its auth and headers.
 	lastSeen map[string]*domain.Endpoint
-	stopCh   chan struct{}
-	interval time.Duration
-	fallback int
-	mu       sync.RWMutex
-	stopOnce sync.Once
+	// lastProbe is when each endpoint was last probed, for per-endpoint
+	// slot_refresh_interval scheduling.
+	lastProbe map[string]time.Time
+	stopCh    chan struct{}
+	interval  time.Duration
+	fallback  int
+	mu        sync.RWMutex
+	stopOnce  sync.Once
 }
 
 // NewSlotDiscoverer builds a discoverer that refreshes every interval. endpoints
@@ -102,6 +105,7 @@ func NewSlotDiscoverer(endpoints func(ctx context.Context) ([]*domain.Endpoint, 
 		interval:   interval,
 		discovered: make(map[string]discoveredSlots),
 		lastSeen:   make(map[string]*domain.Endpoint),
+		lastProbe:  make(map[string]time.Time),
 		stopCh:     make(chan struct{}),
 	}
 }
@@ -211,21 +215,72 @@ func (d *SlotDiscoverer) ModelSlotList(ep *domain.Endpoint) map[string]int {
 	return out
 }
 
-// Start probes once immediately, then on every interval until Stop.
+// Start probes once immediately, then each endpoint on its own interval (its
+// slot_refresh_interval, else the queue-wide one) until Stop.
 func (d *SlotDiscoverer) Start() {
 	go func() {
-		d.Refresh(context.Background())
-		ticker := time.NewTicker(d.interval)
-		defer ticker.Stop()
+		timer := time.NewTimer(0)
+		defer timer.Stop()
 		for {
 			select {
-			case <-ticker.C:
-				d.Refresh(context.Background())
+			case <-timer.C:
+				timer.Reset(d.refreshDue(context.Background(), time.Now()))
 			case <-d.stopCh:
 				return
 			}
 		}
 	}()
+}
+
+// intervalFor is ep's refresh interval.
+func (d *SlotDiscoverer) intervalFor(ep *domain.Endpoint) time.Duration {
+	if ep.SlotRefreshInterval > 0 {
+		return ep.SlotRefreshInterval
+	}
+	return d.interval
+}
+
+// refreshDue probes the endpoints whose interval has run out and returns how
+// long until the next one is due. Endpoints are listed afresh each time, so
+// one added later is picked up within the queue-wide interval.
+func (d *SlotDiscoverer) refreshDue(ctx context.Context, now time.Time) time.Duration {
+	next := d.interval
+	eps, err := d.endpoints(ctx)
+	if err != nil {
+		slog.Debug("slot discovery: listing endpoints failed", "error", err)
+		return next
+	}
+	changed := false
+	for _, ep := range eps {
+		if !probeable(ep) {
+			continue
+		}
+		every := d.intervalFor(ep)
+		d.mu.RLock()
+		last, seen := d.lastProbe[ep.URLString]
+		d.mu.RUnlock()
+		if wait := last.Add(every).Sub(now); seen && wait > 0 {
+			next = min(next, wait)
+			continue
+		}
+		if d.refreshOne(ctx, ep) {
+			changed = true
+		}
+		next = min(next, every)
+	}
+	if changed {
+		d.notify()
+	}
+	return next
+}
+
+// probeable reports whether slot discovery applies to ep at all.
+func probeable(ep *domain.Endpoint) bool {
+	if ep.NoSlotDiscovery {
+		return false
+	}
+	_, ok := slotProbeTypes[ep.Type]
+	return ok
 }
 
 // Stop ends the refresh loop. Safe to call more than once.
@@ -265,9 +320,12 @@ func (d *SlotDiscoverer) RefreshEndpoint(ctx context.Context, ep *domain.Endpoin
 }
 
 func (d *SlotDiscoverer) refreshOne(ctx context.Context, ep *domain.Endpoint) bool {
-	if _, ok := slotProbeTypes[ep.Type]; !ok {
+	if !probeable(ep) {
 		return false
 	}
+	d.mu.Lock()
+	d.lastProbe[ep.URLString] = time.Now()
+	d.mu.Unlock()
 	found, err := d.probe(ctx, ep)
 	if err != nil {
 		slog.Debug("slot discovery: probe failed", "endpoint", ep.Name, "error", err)

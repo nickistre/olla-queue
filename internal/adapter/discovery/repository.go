@@ -204,6 +204,8 @@ func (r *StaticEndpointRepository) LoadFromConfig(ctx context.Context, configs [
 			PreservePath:          cfg.PreservePath,
 			MaxConcurrent:         cfg.MaxConcurrent,
 			QueueAfter:            cfg.QueueAfter,
+			SlotRefreshInterval:   cfg.SlotRefreshInterval,
+			NoSlotDiscovery:       cfg.DiscoverSlots != nil && !*cfg.DiscoverSlots,
 			SlotGroups:            slotGroups(cfg.SlotGroups),
 		}
 

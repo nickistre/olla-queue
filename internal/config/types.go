@@ -370,8 +370,15 @@ type EndpointConfig struct {
 	// QueueAfter makes this an overflow endpoint: a request may use it only
 	// once it has waited this long in the queue, or when no endpoint without
 	// a delay is up. 0 = no delay. Needs proxy.queue.
-	QueueAfter   time.Duration `yaml:"queue_after"`
-	PreservePath bool          `yaml:"preserve_path"`
+	QueueAfter time.Duration `yaml:"queue_after"`
+	// SlotRefreshInterval overrides proxy.queue.slot_refresh_interval for
+	// this endpoint; 0 = the queue-wide value.
+	SlotRefreshInterval time.Duration `yaml:"slot_refresh_interval"`
+	// DiscoverSlots false turns slot discovery off for this endpoint (no
+	// /running, /props or /models probes, so no external load tracking
+	// either). Unset follows proxy.queue.discover_slots.
+	DiscoverSlots *bool `yaml:"discover_slots"`
+	PreservePath  bool  `yaml:"preserve_path"`
 }
 
 // SlotGroupConfig is one capacity pool on an endpoint. A model joins the first
