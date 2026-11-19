@@ -30,6 +30,7 @@ const busy = {
   max_size: 100,
   timeout_seconds: 60,
   hold_seconds: 30,
+  swap_grace_seconds: 3,
   hold_kept: 4,
   hold_moved: 1,
   avg_wait_ms: 800,
@@ -64,6 +65,7 @@ const busy = {
       candidates: 1,
       holding: false,
       cold: true,
+      swap_grace: true,
     },
   ],
   endpoints: [
@@ -219,6 +221,9 @@ describe('QueuePanel stage 2 tags', () => {
     expect(rows[0].querySelector('.tag-cold')).toBeNull();
     expect(rows[1].querySelector('.tag-cold')?.textContent).toBe('cold');
     expect(rows[1].querySelector('.tag-hold')).toBeNull();
+    expect(rows[1].querySelector('.tag-grace')?.textContent).toBe('grace');
+    expect(rows[1].querySelector('.tag-grace')?.getAttribute('title')).toContain('3s');
+    expect(rows[0].querySelector('.tag-grace')).toBeNull();
     expect(document.body.textContent).toContain('sticky 4 kept / 1 moved');
   });
 });

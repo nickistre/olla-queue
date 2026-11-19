@@ -96,6 +96,7 @@ proxy:
     track_external_load: true   # count slots busy with traffic from other clients as taken
     busy_poll_interval: 1s      # llama.cpp /slots poll; llama-swap is watched live via /api/events
     warm_first_max_wait: 10s    # requests for loaded models go first, up to this long; 0 = strict arrival order
+    swap_grace: 0s              # after a loaded model's request, hold ones that would swap it out this long for its next turn (try 2-5s); 0 = off
 
   # Failover: when a connection to a backend fails (refused, reset, network
   # unreachable), Olla marks that endpoint unhealthy and retries the request on

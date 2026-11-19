@@ -260,6 +260,11 @@ type QueueConfig struct {
 	// that has waited this long is served in arrival order regardless. 0 =
 	// strict arrival order.
 	WarmFirstMaxWait time.Duration `yaml:"warm_first_max_wait"`
+	// SwapGrace holds a request that would swap out a loaded model for this
+	// long after a request for that model finishes, so a turn-by-turn session
+	// can send its next turn before the swap. Only within WarmFirstMaxWait of
+	// the request's arrival. 0 = off.
+	SwapGrace time.Duration `yaml:"swap_grace"`
 	// BusyPollInterval is how often llama.cpp /slots is read to see slots busy
 	// with traffic that did not come through this Olla. llama-swap nodes are
 	// watched live through /api/events instead and ignore it.

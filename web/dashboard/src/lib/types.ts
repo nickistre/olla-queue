@@ -296,6 +296,8 @@ export interface QueueWaiter {
   holding: boolean;
   // No candidate endpoint has the model loaded: running it means a load or swap.
   cold: boolean;
+  // Cold, and every free endpoint would swap out a model still inside its swap grace.
+  swap_grace: boolean;
 }
 
 export interface QueueStatsResponse {
@@ -310,6 +312,8 @@ export interface QueueStatsResponse {
   hold_kept: number;
   hold_moved: number;
   hold_seconds: number;
+  // proxy.queue.swap_grace; 0 when off.
+  swap_grace_seconds: number;
   enqueued: number;
   dispatched: number;
   timed_out: number;

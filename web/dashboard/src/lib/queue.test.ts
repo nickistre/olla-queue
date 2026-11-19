@@ -15,6 +15,7 @@ const waiter = (o: Partial<QueueWaiter> = {}): QueueWaiter => ({
   candidates: 2,
   holding: false,
   cold: false,
+  swap_grace: false,
   ...o,
 });
 

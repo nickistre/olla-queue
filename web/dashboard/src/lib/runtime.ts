@@ -222,6 +222,7 @@ export const parseQueue = guarded((raw: unknown): QueueStatsResponse | null => {
     candidates: num(w.candidates),
     holding: w.holding === true,
     cold: w.cold === true,
+    swap_grace: w.swap_grace === true,
   }));
   return {
     enabled: raw.enabled,
@@ -235,6 +236,7 @@ export const parseQueue = guarded((raw: unknown): QueueStatsResponse | null => {
     hold_kept: num(raw.hold_kept),
     hold_moved: num(raw.hold_moved),
     hold_seconds: num(raw.hold_seconds),
+    swap_grace_seconds: num(raw.swap_grace_seconds),
     enqueued: num(raw.enqueued),
     dispatched: num(raw.dispatched),
     timed_out: num(raw.timed_out),

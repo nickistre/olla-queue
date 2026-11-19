@@ -225,7 +225,7 @@
             <td class={cellClass('position')}>{r.position}</td>
             <td class="col-sticky" title={r.user_agent || undefined}>{r.client_ip || '—'}</td>
             <td class="cell-clip" title={r.model}>
-              {r.model || '—'}{#if r.cold}{' '}<span class="tag tag-cold" title="Not loaded on any endpoint it can use: running it means a load, perhaps a swap">cold</span>{/if}
+              {r.model || '—'}{#if r.cold}{' '}<span class="tag tag-cold" title="Not loaded on any endpoint it can use: running it means a load, perhaps a swap">cold</span>{/if}{#if r.swap_grace}{' '}<span class="tag tag-grace" title="Waiting up to {fmtDuration(data.swap_grace_seconds * 1000)} for the loaded model's next request before swapping it out">grace</span>{/if}
             </td>
             <td>
               {#if r.sticky_label}<span class="pill">{r.sticky_label}</span>{:else}<span class="dash">—</span>{/if}{#if r.holding}{' '}<span class="tag tag-hold" title="Waiting for its pinned endpoint to keep the conversation's KV cache, up to {fmtDuration(data.hold_seconds * 1000)}">holding</span>{/if}
@@ -338,7 +338,8 @@
   .tag-cold {
     color: var(--blue);
   }
-  .tag-hold {
+  .tag-hold,
+  .tag-grace {
     color: var(--amber);
   }
   .model-slot.is-full {

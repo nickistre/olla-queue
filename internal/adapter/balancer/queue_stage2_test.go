@@ -303,3 +303,89 @@ func TestQueue_ConfiguredEndpointLimitCapsEveryGroup(t *testing.T) {
 		t.Fatalf("embeddings request after the slot freed: %+v", r)
 	}
 }
+
+// graceQueue is a gpuNode queue with a swap grace, qwen3.6 loaded and running.
+func graceQueue(t *testing.T, grace, warmCap time.Duration) (*QueueWrapper, []*domain.Endpoint, *domain.Endpoint) {
+	t.Helper()
+	res, node := gpuNode("qwen3.6")
+	cfg := defaultQueueConfig()
+	cfg.WarmFirstMaxWait = warmCap
+	cfg.SwapGrace = grace
+	q := NewQueueWrapper(NewRoundRobinSelector(NewTestStatsCollector()), cfg, res)
+	t.Cleanup(q.Stop)
+	eps := []*domain.Endpoint{node}
+	running, err := q.Select(modelCtx("qwen3.6"), eps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return q, eps, running
+}
+
+func TestQueue_SwapGraceKeepsSlotForNextTurn(t *testing.T) {
+	q, eps, running := graceQueue(t, time.Second, time.Minute)
+	cold := selectAsync(modelCtx("qwen3.8"), q, eps)
+	waitForDepth(t, q, 1)
+
+	// The turn ends; the next turn arrives inside the grace and gets the
+	// slot, though a request for another model was waiting first.
+	q.DecrementConnections(running)
+	if s := q.Stats(); !s.Waiting[0].SwapGrace || s.SwapGraceSeconds != 1 {
+		t.Fatalf("waiter should be held by swap grace: %+v", s)
+	}
+	next, err := q.Select(modelCtx("qwen3.6"), eps)
+	if err != nil {
+		t.Fatalf("next turn: %v", err)
+	}
+	select {
+	case r := <-cold:
+		t.Fatalf("cold request swapped the model out during the grace: %+v", r)
+	default:
+	}
+	q.DecrementConnections(next)
+	if q.Stats().Depth != 1 {
+		t.Fatal("cold request should still be waiting")
+	}
+}
+
+func TestQueue_SwapGraceLapsesWithoutNextTurn(t *testing.T) {
+	q, eps, running := graceQueue(t, 50*time.Millisecond, time.Minute)
+	cold := selectAsync(modelCtx("qwen3.8"), q, eps)
+	waitForDepth(t, q, 1)
+
+	start := time.Now()
+	q.DecrementConnections(running)
+	// No release follows: the grace's own timer has to dispatch it.
+	if r := mustReceive(t, cold); r.err != nil {
+		t.Fatalf("cold request after the grace: %+v", r)
+	}
+	if waited := time.Since(start); waited < 40*time.Millisecond {
+		t.Fatalf("cold request went after %s, inside the grace", waited)
+	}
+}
+
+func TestQueue_SwapGraceHoldsNewColdRequestsToo(t *testing.T) {
+	q, eps, running := graceQueue(t, time.Second, time.Minute)
+	q.DecrementConnections(running)
+
+	// A request for another model arriving during the grace queues rather
+	// than taking the free slot.
+	cold := selectAsync(modelCtx("qwen3.8"), q, eps)
+	waitForDepth(t, q, 1)
+	select {
+	case r := <-cold:
+		t.Fatalf("new cold request took the slot during the grace: %+v", r)
+	default:
+	}
+}
+
+func TestQueue_SwapGraceStopsAtWarmFirstCap(t *testing.T) {
+	q, eps, running := graceQueue(t, time.Second, 30*time.Millisecond)
+	cold := selectAsync(modelCtx("qwen3.8"), q, eps)
+	waitForDepth(t, q, 1)
+	time.Sleep(50 * time.Millisecond) // past warm_first_max_wait
+
+	q.DecrementConnections(running)
+	if r := mustReceive(t, cold); r.err != nil {
+		t.Fatalf("aged cold request should not be held: %+v", r)
+	}
+}

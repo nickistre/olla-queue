@@ -329,6 +329,7 @@ Caps in-flight requests per endpoint and holds the overflow in a FIFO queue unti
 | `queue.slot_refresh_interval` | duration | `30s` | How often discovered slot counts are refreshed |
 | `queue.track_external_load` | bool | `true` | Count slots a backend reports busy with other clients' traffic as taken (llama-swap `/api/events`, llama.cpp `/slots`). Needs `discover_slots` |
 | `queue.warm_first_max_wait` | duration | `10s` | Requests whose model is loaded run before ones that would load or swap a model, until a request has waited this long; then arrival order. `0` = strict arrival order |
+| `queue.swap_grace` | duration | `0s` | After a request for a loaded model finishes, requests that would swap it out wait this long for its next request. Must be shorter than `warm_first_max_wait`, which also caps it. `0` = off |
 | `queue.busy_poll_interval` | duration | `1s` | How often llama.cpp `/slots` is read for external load; llama-swap is watched live instead |
 
 **Environment Variables**: `OLLA_PROXY_QUEUE_ENABLED`, `OLLA_PROXY_QUEUE_MAX_SIZE`, `OLLA_PROXY_QUEUE_TIMEOUT`

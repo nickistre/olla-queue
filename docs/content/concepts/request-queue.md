@@ -123,6 +123,18 @@ The Queue tab tags a holding request **holding**. Its Dispatched tile counts how
 
 The Queue tab tags such requests **cold**: no backend they can use has their model loaded.
 
+#### Swap grace
+
+Reordering only helps requests that are already waiting. In a turn-by-turn session (a chat, a coding agent), the next turn arrives a second or two after the last one finishes, while the client reads the reply or runs a tool. In that gap the slot is free and nothing warm is queued, so a waiting request for another model takes it and the session's model is swapped out. The next turn then waits for a swap back.
+
+`proxy.queue.swap_grace` (default `0`, off) closes that gap. When a request for a loaded model finishes, requests that would swap that model out wait up to `swap_grace` for its next request:
+
+- It applies per swap domain: the model's slot group, else the whole endpoint. A request that can run elsewhere without a swap, or on a backend that doesn't report what's loaded, isn't held.
+- A request that has waited `warm_first_max_wait` is no longer held, so `swap_grace` must be shorter than it. With `warm_first_max_wait: 10s`, `2s` to `5s` suits most clients.
+- New requests are held too, so a request arriving during the grace can't take the slot ahead of one already waiting.
+
+The Queue tab tags a request held this way **grace**.
+
 ### Prefer a backend with the model loaded
 
 When several backends have room, the request goes to one with its model already loaded. Next come backends that don't report what they have loaded (Ollama, vLLM and others), and last ones that would have to load the model. The configured `load_balancer` (priority, least connections, round robin) then picks among that set.

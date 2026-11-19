@@ -113,6 +113,14 @@ func (s staticSlots) GroupSlots(ep *domain.Endpoint, group string) (int, string)
 
 // reservation records which endpoint and model a Select claimed, so the
 // matching DecrementConnections releases the right per-model slot.
+// swapGrace is a live grace on one swap domain: until ends it, requests that
+// would swap model out wait. timer re-runs dispatch when it ends.
+type swapGrace struct {
+	until time.Time
+	timer *time.Timer
+	model string
+}
+
 type reservation struct {
 	url   string
 	model string
@@ -193,8 +201,11 @@ type QueueWrapper struct {
 	stats   queueCounters
 	cfg     config.QueueConfig
 	holdFor time.Duration
-	mu      sync.Mutex
-	closed  bool
+	// grace holds, per swap domain (slot group, else endpoint), when the swap
+	// grace for the model that last finished there ends; see startGraceLocked.
+	grace  map[string]swapGrace
+	mu     sync.Mutex
+	closed bool
 }
 
 type queueCounters struct {
@@ -238,6 +249,7 @@ func NewQueueWrapper(inner domain.EndpointSelector, cfg config.QueueConfig, reso
 		reservations:  make(map[*domain.Endpoint]reservation),
 		known:         make(map[string]*domain.Endpoint),
 		down:          make(map[string]time.Time),
+		grace:         make(map[string]swapGrace),
 		modelOf:       requestedModel,
 	}
 }
@@ -273,7 +285,7 @@ func (q *QueueWrapper) DecrementConnections(endpoint *domain.Endpoint) {
 	q.inner.DecrementConnections(endpoint)
 
 	q.mu.Lock()
-	q.releaseLocked(endpoint)
+	q.startGraceLocked(endpoint, q.releaseLocked(endpoint))
 	q.dispatchLocked()
 	q.mu.Unlock()
 }
@@ -313,7 +325,7 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 	// leaves no waiter able to use a free slot, so any slot this request can
 	// take now is one no waiter wants. A holding waiter only wants its pinned
 	// endpoint, which it gets first whenever that frees.
-	if free := q.admissibleLocked(ctx, endpoints, stickyKey, holdUntil, now); len(free) > 0 {
+	if free := q.admissibleLocked(ctx, endpoints, stickyKey, holdUntil, now, now); len(free) > 0 {
 		ep, err := q.reserveLocked(ctx, free)
 		q.mu.Unlock()
 		return ep, err
@@ -685,6 +697,9 @@ func (q *QueueWrapper) Stop() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.closed = true
+	for _, g := range q.grace {
+		g.timer.Stop()
+	}
 	for e := q.waiters.Front(); e != nil; {
 		next := e.Next()
 		q.completeLocked(waiterAt(e), queueResult{err: ErrQueueClosed})
@@ -717,7 +732,7 @@ func (q *QueueWrapper) dispatchPassLocked(now time.Time, eligible func(*queueWai
 	for e := q.waiters.Front(); e != nil; {
 		next := e.Next()
 		w := waiterAt(e)
-		if free := q.admissibleLocked(w.ctx, w.candidates, w.stickyKey, w.holdUntil, now); len(free) > 0 && eligible(w, free) {
+		if free := q.admissibleLocked(w.ctx, w.candidates, w.stickyKey, w.holdUntil, w.enqueuedAt, now); len(free) > 0 && eligible(w, free) {
 			ep, err := q.reserveLocked(w.ctx, free)
 			if err == nil {
 				q.countHoldLocked(w, ep)
@@ -757,12 +772,13 @@ func (q *QueueWrapper) removeLocked(w *queueWaiter) {
 	}
 }
 
-// admissibleLocked is freeLocked plus sticky hold: while a request's hold
-// lasts and its pinned endpoint is one of its candidates, that endpoint is
-// the only one it will take. Once the hold lapses, or the pin is gone or
-// points at an endpoint this request cannot use, any free candidate will do.
-func (q *QueueWrapper) admissibleLocked(ctx context.Context, candidates []*domain.Endpoint, stickyKey string, holdUntil, now time.Time) []*domain.Endpoint {
-	free := q.freeLocked(ctx, candidates)
+// admissibleLocked is freeLocked plus swap grace and sticky hold. While a
+// request's hold lasts and its pinned endpoint is one of its candidates, that
+// endpoint is the only one it will take. Once the hold lapses, or the pin is
+// gone or points at an endpoint this request cannot use, any free candidate
+// will do. since is when the request arrived, for the swap grace's age cap.
+func (q *QueueWrapper) admissibleLocked(ctx context.Context, candidates []*domain.Endpoint, stickyKey string, holdUntil, since, now time.Time) []*domain.Endpoint {
+	free := q.graceLocked(ctx, q.freeLocked(ctx, candidates), since, now)
 	if holdUntil.IsZero() || !now.Before(holdUntil) || q.pinPeek == nil {
 		return free
 	}
@@ -786,6 +802,74 @@ func (q *QueueWrapper) admissibleLocked(ctx context.Context, candidates []*domai
 		}
 	}
 	return nil // pinned endpoint busy: wait for it
+}
+
+// graceKey names the swap domain model runs in on ep: its slot group, else the
+// whole endpoint.
+func graceKey(ep *domain.Endpoint, model string) string {
+	if g := slotGroupOf(ep, model); g != "" {
+		return modelKey(ep.URLString, g)
+	}
+	return ep.URLString
+}
+
+// startGraceLocked opens a swap grace after a request for a loaded model
+// finishes. A turn-by-turn client sends its next turn a moment later; without
+// the grace, a waiting request for another model would take the free slot in
+// that gap and swap this one out from under the conversation.
+func (q *QueueWrapper) startGraceLocked(ep *domain.Endpoint, res reservation) {
+	if q.cfg.SwapGrace <= 0 || q.cfg.WarmFirstMaxWait <= 0 || res.model == "" || q.closed {
+		return
+	}
+	if q.resolver.ModelState(ep, res.model) != ModelStateLoaded {
+		return
+	}
+	key := graceKey(ep, res.model)
+	g := q.grace[key]
+	if g.timer == nil {
+		g.timer = time.AfterFunc(q.cfg.SwapGrace, q.Wake)
+	} else {
+		g.timer.Reset(q.cfg.SwapGrace)
+	}
+	g.until = time.Now().Add(q.cfg.SwapGrace)
+	g.model = res.model
+	q.grace[key] = g
+}
+
+// graceLocked drops free endpoints where running this request would swap out
+// a model still inside its swap grace. It never holds a request past
+// warm_first_max_wait from its arrival, and never one for the model the grace
+// protects.
+func (q *QueueWrapper) graceLocked(ctx context.Context, free []*domain.Endpoint, since, now time.Time) []*domain.Endpoint {
+	if len(q.grace) == 0 || now.Sub(since) >= q.cfg.WarmFirstMaxWait {
+		return free
+	}
+	out := free[:0:0]
+	for _, ep := range free {
+		if !q.inGraceLocked(ctx, ep, now) {
+			out = append(out, ep)
+		}
+	}
+	return out
+}
+
+func (q *QueueWrapper) inGraceLocked(ctx context.Context, ep *domain.Endpoint, now time.Time) bool {
+	model := q.modelOf(ctx, ep)
+	if model == "" {
+		return false
+	}
+	g, ok := q.grace[graceKey(ep, model)]
+	if !ok || !now.Before(g.until) || g.model == model {
+		return false
+	}
+	return q.resolver.ModelState(ep, model) == ModelStateCold
+}
+
+// graceHeldLocked reports whether swap grace is all that keeps w waiting: it
+// has free endpoints, but each would swap out a model inside its grace.
+func (q *QueueWrapper) graceHeldLocked(w *queueWaiter, now time.Time) bool {
+	free := q.freeLocked(w.ctx, w.candidates)
+	return len(free) > 0 && len(q.graceLocked(w.ctx, free, w.enqueuedAt, now)) == 0
 }
 
 // anyLoadedLocked reports whether the request's model is loaded on one of
@@ -854,7 +938,7 @@ func (q *QueueWrapper) reserveLocked(ctx context.Context, free []*domain.Endpoin
 	return &claimed, nil
 }
 
-func (q *QueueWrapper) releaseLocked(ep *domain.Endpoint) {
+func (q *QueueWrapper) releaseLocked(ep *domain.Endpoint) reservation {
 	res, ok := q.reservations[ep]
 	if ok {
 		delete(q.reservations, ep)
@@ -881,6 +965,7 @@ func (q *QueueWrapper) releaseLocked(ep *domain.Endpoint) {
 	if res.group != "" {
 		decrementOrDelete(q.groupInUse, modelKey(res.url, res.group))
 	}
+	return res
 }
 
 func decrementOrDelete(m map[string]int, k string) {
@@ -1050,6 +1135,13 @@ func (q *QueueWrapper) groupStateLocked(ep *domain.Endpoint, g domain.SlotGroup)
 	return GroupStateUnknown
 }
 
+func (q *QueueWrapper) swapGraceSeconds() float64 {
+	if q.cfg.WarmFirstMaxWait <= 0 {
+		return 0
+	}
+	return q.cfg.SwapGrace.Seconds()
+}
+
 // waiterAt unwraps a queue element. The list only ever holds *queueWaiter.
 func waiterAt(e *list.Element) *queueWaiter {
 	w, _ := e.Value.(*queueWaiter)
@@ -1133,6 +1225,9 @@ type QueueWaiterStats struct {
 	// Cold is true when none of its candidate endpoints has the model loaded,
 	// so running it means a load, perhaps a swap.
 	Cold bool `json:"cold"`
+	// SwapGrace is true while the only free endpoints would swap out a model
+	// whose swap grace is still running.
+	SwapGrace bool `json:"swap_grace"`
 }
 
 // QueueStats is a point-in-time snapshot of queue activity.
@@ -1148,19 +1243,21 @@ type QueueStats struct {
 	WaitsCompleted uint64  `json:"waits_completed"`
 	// HoldKept and HoldMoved count queued requests with a live sticky pin
 	// that got their pinned endpoint, or went elsewhere after the hold.
-	HoldKept     uint64  `json:"hold_kept"`
-	HoldMoved    uint64  `json:"hold_moved"`
-	HoldSeconds  float64 `json:"hold_seconds"`
-	Enqueued     uint64  `json:"enqueued"`
-	Dispatched   uint64  `json:"dispatched"`
-	TimedOut     uint64  `json:"timed_out"`
-	RejectedFull uint64  `json:"rejected_full"`
-	Cancelled    uint64  `json:"cancelled"`
-	Failed       uint64  `json:"failed"`
-	Depth        int     `json:"depth"`
-	PeakDepth    int     `json:"peak_depth"`
-	MaxSize      int     `json:"max_size"`
-	Enabled      bool    `json:"enabled"`
+	HoldKept    uint64  `json:"hold_kept"`
+	HoldMoved   uint64  `json:"hold_moved"`
+	HoldSeconds float64 `json:"hold_seconds"`
+	// SwapGraceSeconds is proxy.queue.swap_grace; 0 when off.
+	SwapGraceSeconds float64 `json:"swap_grace_seconds"`
+	Enqueued         uint64  `json:"enqueued"`
+	Dispatched       uint64  `json:"dispatched"`
+	TimedOut         uint64  `json:"timed_out"`
+	RejectedFull     uint64  `json:"rejected_full"`
+	Cancelled        uint64  `json:"cancelled"`
+	Failed           uint64  `json:"failed"`
+	Depth            int     `json:"depth"`
+	PeakDepth        int     `json:"peak_depth"`
+	MaxSize          int     `json:"max_size"`
+	Enabled          bool    `json:"enabled"`
 }
 
 // Stats returns a snapshot of queue counters, per-endpoint slot usage and the
@@ -1203,6 +1300,7 @@ func (q *QueueWrapper) Stats() QueueStats {
 			Candidates: len(w.candidates),
 			Holding:    q.holdingLocked(w, now),
 			Cold:       q.coldLocked(w),
+			SwapGrace:  q.graceHeldLocked(w, now),
 		})
 		keys = append(keys, w.stickyKey)
 	}
@@ -1229,25 +1327,26 @@ func (q *QueueWrapper) Stats() QueueStats {
 		avgMs = float64(waitTotalNs) / float64(done) / float64(time.Millisecond)
 	}
 	return QueueStats{
-		Enabled:        true,
-		Depth:          depth,
-		PeakDepth:      int(q.stats.peakDepth.Load()),
-		MaxSize:        q.cfg.MaxSize,
-		TimeoutSeconds: q.cfg.Timeout.Seconds(),
-		Enqueued:       q.stats.enqueued.Load(),
-		Dispatched:     q.stats.dispatched.Load(),
-		TimedOut:       q.stats.timedOut.Load(),
-		RejectedFull:   q.stats.rejectedFull.Load(),
-		Cancelled:      q.stats.cancelled.Load(),
-		Failed:         q.stats.failed.Load(),
-		AvgWaitMs:      avgMs,
-		MaxWaitMs:      float64(q.stats.waitMaxNs.Load()) / float64(time.Millisecond),
-		WaitTotalMs:    float64(waitTotalNs) / float64(time.Millisecond),
-		WaitsCompleted: done,
-		HoldKept:       q.stats.holdKept.Load(),
-		HoldMoved:      q.stats.holdMoved.Load(),
-		HoldSeconds:    q.holdFor.Seconds(),
-		Endpoints:      eps,
-		Waiting:        waiting,
+		Enabled:          true,
+		Depth:            depth,
+		PeakDepth:        int(q.stats.peakDepth.Load()),
+		MaxSize:          q.cfg.MaxSize,
+		TimeoutSeconds:   q.cfg.Timeout.Seconds(),
+		Enqueued:         q.stats.enqueued.Load(),
+		Dispatched:       q.stats.dispatched.Load(),
+		TimedOut:         q.stats.timedOut.Load(),
+		RejectedFull:     q.stats.rejectedFull.Load(),
+		Cancelled:        q.stats.cancelled.Load(),
+		Failed:           q.stats.failed.Load(),
+		AvgWaitMs:        avgMs,
+		MaxWaitMs:        float64(q.stats.waitMaxNs.Load()) / float64(time.Millisecond),
+		WaitTotalMs:      float64(waitTotalNs) / float64(time.Millisecond),
+		WaitsCompleted:   done,
+		HoldKept:         q.stats.holdKept.Load(),
+		HoldMoved:        q.stats.holdMoved.Load(),
+		HoldSeconds:      q.holdFor.Seconds(),
+		SwapGraceSeconds: q.swapGraceSeconds(),
+		Endpoints:        eps,
+		Waiting:          waiting,
 	}
 }

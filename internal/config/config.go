@@ -592,6 +592,12 @@ func (c *Config) validateQueue() error {
 	if q.WarmFirstMaxWait < 0 {
 		return fmt.Errorf("proxy.queue.warm_first_max_wait must be >= 0 (0 = strict arrival order), got %s", q.WarmFirstMaxWait)
 	}
+	if q.SwapGrace < 0 {
+		return fmt.Errorf("proxy.queue.swap_grace must be >= 0 (0 = off), got %s", q.SwapGrace)
+	}
+	if q.SwapGrace > 0 && q.SwapGrace >= q.WarmFirstMaxWait {
+		return fmt.Errorf("proxy.queue.swap_grace (%s) must be shorter than warm_first_max_wait (%s), which caps it; 0 turns warm-first and the grace off", q.SwapGrace, q.WarmFirstMaxWait)
+	}
 	if s := c.Proxy.StickySessions.HoldSeconds; s < 0 {
 		return fmt.Errorf("proxy.sticky_sessions.hold_seconds must be >= 0 (0 = never wait), got %d", s)
 	}

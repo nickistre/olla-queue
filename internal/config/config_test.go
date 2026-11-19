@@ -1700,6 +1700,23 @@ func TestQueueConfig_Validate(t *testing.T) {
 			c.Proxy.Queue.Enabled = true
 			c.Proxy.Queue.WarmFirstMaxWait = -time.Second
 		}},
+		{name: "negative swap_grace", wantErr: true, modify: func(c *Config) {
+			c.Proxy.Queue.Enabled = true
+			c.Proxy.Queue.SwapGrace = -time.Second
+		}},
+		{name: "swap_grace not shorter than warm_first_max_wait", wantErr: true, modify: func(c *Config) {
+			c.Proxy.Queue.Enabled = true
+			c.Proxy.Queue.SwapGrace = c.Proxy.Queue.WarmFirstMaxWait
+		}},
+		{name: "swap_grace without warm_first_max_wait", wantErr: true, modify: func(c *Config) {
+			c.Proxy.Queue.Enabled = true
+			c.Proxy.Queue.WarmFirstMaxWait = 0
+			c.Proxy.Queue.SwapGrace = time.Second
+		}},
+		{name: "swap_grace under warm_first_max_wait", modify: func(c *Config) {
+			c.Proxy.Queue.Enabled = true
+			c.Proxy.Queue.SwapGrace = 3 * time.Second
+		}},
 		{name: "negative sticky hold", wantErr: true, modify: func(c *Config) {
 			c.Proxy.Queue.Enabled = true
 			c.Proxy.StickySessions.HoldSeconds = -1
