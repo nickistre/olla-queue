@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/thushan/olla/internal/core/domain"
+	"github.com/thushan/olla/internal/version"
 )
 
 // inflightMsg builds one llama-swap SSE payload: the inflight event JSON is
@@ -453,5 +455,25 @@ func TestQueue_SlotGroupCountsOutsideTraffic(t *testing.T) {
 	q.ObserveBusy(node, BackendBusy{Valid: true, Total: 0, Models: map[string]int{}})
 	if r := mustReceive(t, ch); r.err != nil {
 		t.Fatalf("qwen3.8 should run once outside traffic clears: %+v", r)
+	}
+}
+
+func TestNewBackendRequest_UserAgent(t *testing.T) {
+	ep := makeEndpoint("taki", "http://taki:8080")
+	req, err := newBackendRequest(context.Background(), ep, "/props?model=m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ua := req.Header.Get("User-Agent"); !strings.HasPrefix(ua, version.ShortName+"-Queue/") {
+		t.Fatalf("user agent = %q", ua)
+	}
+
+	ep.Headers = map[string]string{"User-Agent": "custom"}
+	req, err = newBackendRequest(context.Background(), ep, "/running")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ua := req.Header.Get("User-Agent"); ua != "custom" {
+		t.Fatalf("endpoint header should win, got %q", ua)
 	}
 }

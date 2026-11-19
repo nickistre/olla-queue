@@ -16,6 +16,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/thushan/olla/internal/core/domain"
+	"github.com/thushan/olla/internal/version"
 )
 
 const (
@@ -384,6 +385,9 @@ func newBackendRequest(ctx context.Context, ep *domain.Endpoint, pathAndQuery st
 	if err != nil {
 		return nil, err
 	}
+	// Named like the health checker's probes so backend logs show who is
+	// polling; set first so an endpoint's own User-Agent header still wins.
+	req.Header.Set("User-Agent", fmt.Sprintf("%s-Queue/%s", version.ShortName, version.Version))
 	for k, v := range ep.Headers {
 		req.Header.Set(k, v)
 	}
