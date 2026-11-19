@@ -54,10 +54,10 @@ func TestBuildQueueSummary(t *testing.T) {
 		t.Fatal("queue disabled: summary must be absent")
 	}
 	on := &Application{queueStatsFn: func() *balancer.QueueStats {
-		return &balancer.QueueStats{Enabled: true, Depth: 4, MaxSize: 10, WaitTotalMs: 1500, WaitsCompleted: 3}
+		return &balancer.QueueStats{Enabled: true, Depth: 4, MaxSize: 10, WaitTotalMs: 1500, WaitsCompleted: 3, MinWaitMs: 100, MaxWaitMs: 900}
 	}}
 	s := on.buildQueueSummary()
-	if s == nil || s.Depth != 4 || s.WaitTotalMs != 1500 || s.WaitsCompleted != 3 {
+	if s == nil || s.Depth != 4 || s.WaitTotalMs != 1500 || s.WaitsCompleted != 3 || s.MinWaitMs != 100 || s.MaxWaitMs != 900 {
 		t.Fatalf("summary = %+v", s)
 	}
 }

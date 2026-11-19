@@ -18,10 +18,6 @@ export interface Sample {
   // Requests waiting in the request queue; null when the queue is off (or the
   // backend predates it), so the chart can tell "off" from "empty".
   queueDepth: number | null;
-  // Monotonic queue wait counters, carried raw so the mean over the visible
-  // window can be taken from the first and last samples (windowMeanWaitMs).
-  queueWaitTotalMs: number;
-  queueWaitsCompleted: number;
   // derived per-tick rates
   reqPerSec: number;
   bytesPerSec: number;
@@ -79,36 +75,6 @@ export function parseTrafficBytes(s: string | undefined): number {
   return parseFloat(m[1]) * units[m[2]];
 }
 
-/** Mean queue wait over the samples shown: the wait time accrued between the
- *  oldest and newest usable samples, divided by the requests that left the
- *  queue in that span. Only the newest unbroken run of non-decreasing counters
- *  counts, so a process restart (counters back to 0) starts a fresh window
- *  instead of producing a negative or inflated mean. null when no request
- *  left the queue in the window, or the queue is off. */
-export function windowMeanWaitMs(list: Sample[]): number | null {
-  let last: Sample | null = null;
-  let first: Sample | null = null;
-  for (let i = list.length - 1; i >= 0; i--) {
-    const s = list[i];
-    if (s.error || s.queueDepth === null) continue;
-    if (last === null) {
-      last = s;
-      first = s;
-      continue;
-    }
-    if (first !== null && (s.queueWaitsCompleted > first.queueWaitsCompleted || s.queueWaitTotalMs > first.queueWaitTotalMs)) {
-      // Counters went down moving forward in time from here: a restart sits
-      // between this sample and `first`, so the window stops at `first`.
-      break;
-    }
-    first = s;
-  }
-  if (last === null || first === null) return null;
-  const done = last.queueWaitsCompleted - first.queueWaitsCompleted;
-  if (done <= 0) return null;
-  return clampNonNegative(last.queueWaitTotalMs - first.queueWaitTotalMs) / done;
-}
-
 // --- singleton state ---
 
 let samples: Sample[] = $state([]);
@@ -128,8 +94,6 @@ function buildSample(data: StatusResponse, now: number): Sample {
   const activeConnections = typeof sys.active_connections === 'number' ? sys.active_connections : 0;
   const q = data.queue;
   const queueDepth = q && typeof q.depth === 'number' ? q.depth : null;
-  const queueWaitTotalMs = q && typeof q.wait_total_ms === 'number' ? q.wait_total_ms : 0;
-  const queueWaitsCompleted = q && typeof q.waits_completed === 'number' ? q.waits_completed : 0;
 
   let reqPerSec = 0;
   let bytesPerSec = 0;
@@ -147,8 +111,6 @@ function buildSample(data: StatusResponse, now: number): Sample {
     totalBytes,
     activeConnections,
     queueDepth,
-    queueWaitTotalMs,
-    queueWaitsCompleted,
     reqPerSec,
     bytesPerSec,
   };
@@ -207,8 +169,6 @@ export const history = {
       totalBytes: 0,
       activeConnections: 0,
       queueDepth: null,
-      queueWaitTotalMs: 0,
-      queueWaitsCompleted: 0,
       reqPerSec: 0,
       bytesPerSec: 0,
       error: true,

@@ -4,6 +4,7 @@ import { overview } from '../lib/stores/overview.svelte';
 import { history } from '../lib/stores/history.svelte';
 import OverviewPanel from './OverviewPanel.svelte';
 import type { StatusResponse } from '../lib/types';
+import { fmtMs } from '../lib/format';
 
 let component: ReturnType<typeof mount> | undefined;
 beforeEach(() => history.reset());
@@ -52,6 +53,8 @@ async function load(queue: StatusResponse['queue']) {
   flushSync();
 }
 
+const tile = (label: string) =>
+  [...document.querySelectorAll('.tile')].find((t) => t.querySelector('.label')?.textContent?.trim() === label);
 const tileLabels = () => [...document.querySelectorAll('.tile .label')].map((l) => l.textContent?.trim());
 
 describe('Overview queue tiles', () => {
@@ -59,21 +62,28 @@ describe('Overview queue tiles', () => {
     component = mount(OverviewPanel, { target: document.body });
     await load(undefined);
     expect(tileLabels()).not.toContain('Queued requests');
-    expect(tileLabels()).not.toContain('Mean queue wait');
+    expect(tileLabels()).not.toContain('Queue avg wait');
+    expect(tileLabels()).not.toContain('Queue wait range');
   });
 
-  it('show depth against max size and the mean wait over the chart window', async () => {
+  it('show depth against max size, and the avg wait and range since boot', async () => {
     component = mount(OverviewPanel, { target: document.body });
-    // Two polls: 3 requests left the queue between them, accruing 4.5s of wait.
-    await load({ depth: 1, peak_depth: 2, max_size: 50, wait_total_ms: 500, waits_completed: 1, timed_out: 0, rejected_full: 0 });
-    await load({ depth: 3, peak_depth: 4, max_size: 50, wait_total_ms: 5000, waits_completed: 4, timed_out: 1, rejected_full: 1 });
+    await load({ depth: 3, peak_depth: 4, max_size: 50, wait_total_ms: 6000, waits_completed: 4, min_wait_ms: 250, max_wait_ms: 3000, timed_out: 1, rejected_full: 1 });
 
-    const tile = (label: string) =>
-      [...document.querySelectorAll('.tile')].find((t) => t.querySelector('.label')?.textContent?.trim() === label);
     const queued = tile('Queued requests');
     expect(queued?.querySelector('.value')?.textContent).toContain('3');
     expect(queued?.querySelector('.value')?.textContent).toContain('/ 50');
     expect(queued?.querySelector('.sub')?.textContent).toContain('2 turned away');
-    expect(tile('Mean queue wait')?.querySelector('.value')?.textContent?.trim()).toBe('1.5s');
+    expect(tile('Queue avg wait')?.querySelector('.value')?.textContent?.trim()).toBe('1.5s');
+    expect(tile('Queue avg wait')?.querySelector('.sub')?.textContent).toContain('across 4 queued requests');
+    expect(tile('Queue wait range')?.querySelector('.value')?.textContent?.trim()).toBe(`${fmtMs(250)}–${fmtMs(3000)}`);
+  });
+
+  it('show a dash before anything has queued', async () => {
+    component = mount(OverviewPanel, { target: document.body });
+    await load({ depth: 0, peak_depth: 0, max_size: 50, wait_total_ms: 0, waits_completed: 0, min_wait_ms: 0, max_wait_ms: 0, timed_out: 0, rejected_full: 0 });
+    expect(tile('Queue avg wait')?.querySelector('.value')?.textContent?.trim()).toBe('—');
+    expect(tile('Queue wait range')?.querySelector('.value')?.textContent?.trim()).toBe('—');
+    expect(tile('Queue avg wait')?.querySelector('.sub')?.textContent).toContain('nothing queued yet');
   });
 });

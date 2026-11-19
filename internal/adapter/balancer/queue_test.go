@@ -409,8 +409,12 @@ func TestQueue_StatsListsWaitersWithCallerAndPin(t *testing.T) {
 	mustReceive(t, first)
 	q.DecrementConnections(a)
 	mustReceive(t, second)
-	if s := q.Stats(); s.WaitsCompleted != 2 || s.WaitTotalMs <= 0 || len(s.Waiting) != 0 {
+	s = q.Stats()
+	if s.WaitsCompleted != 2 || s.WaitTotalMs <= 0 || len(s.Waiting) != 0 {
 		t.Fatalf("counters after drain: %+v", s)
+	}
+	if s.MinWaitMs <= 0 || s.MinWaitMs > s.MaxWaitMs {
+		t.Fatalf("wait range %v-%v", s.MinWaitMs, s.MaxWaitMs)
 	}
 }
 
@@ -579,5 +583,15 @@ func TestQueue_StressPerModelNeverExceedsSlots(t *testing.T) {
 	}
 	if s.Endpoints[0].InUse != 0 || s.Depth != 0 {
 		t.Fatalf("not drained: %+v", s)
+	}
+}
+
+func TestStoreMinTreatsZeroAsUnset(t *testing.T) {
+	var v atomic.Int64
+	storeMin(&v, 500)
+	storeMin(&v, 900)
+	storeMin(&v, 200)
+	if v.Load() != 200 {
+		t.Fatalf("min = %d, want 200", v.Load())
 	}
 }

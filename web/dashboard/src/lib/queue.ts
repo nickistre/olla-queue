@@ -1,7 +1,6 @@
 // Pure view logic for the Queue panel and the Overview queue tiles, kept out
 // of the components so the edge cases are unit-testable.
 import type { QueueEndpointStats, QueueModelStats, QueueWaiter } from './types';
-import type { Sample } from './stores/history.svelte';
 
 // Omit<..., never> turns the interface into a mapped type, which picks up the
 // implicit index signature SortableTable's Row constraint needs (same trick as
@@ -49,14 +48,6 @@ export function fmtClockTime(iso: string): string {
 export function slotFillPct(inUse: number, slots: number): number {
   if (slots <= 0) return 0;
   return Math.min(100, (Math.max(0, inUse) / slots) * 100);
-}
-
-/** Time covered by the non-error samples the chart shows, for the "over the
- *  last N" label on the mean-wait tile. 0 with fewer than two samples. */
-export function windowSpanMs(list: Sample[]): number {
-  const good = list.filter((s) => !s.error);
-  if (good.length < 2) return 0;
-  return good[good.length - 1].t - good[0].t;
 }
 
 export type SlotStatus =

@@ -7,7 +7,7 @@
   import PctBar from '../components/PctBar.svelte';
   import SortableTable from '../components/SortableTable.svelte';
   import type { Column, SortState } from '../components/SortableTable.svelte';
-  import { fmtBytes, fmtInt, fmtUptime, fmtMs, fmtUntil, fmtDuration, shortCommit, parseTrafficBytes } from '../lib/format';
+  import { fmtBytes, fmtInt, fmtUptime, fmtMs, fmtUntil, shortCommit, parseTrafficBytes } from '../lib/format';
   import { stableId } from '../lib/dom-id';
   import RuntimeCards from './RuntimeCards.svelte';
   import HerdFilter from '../components/HerdFilter.svelte';
@@ -26,8 +26,6 @@
   } from '../lib/herd';
   import { getNow as liveNow } from '../lib/clock.svelte';
   import type { EndpointSummary } from '../lib/types';
-  import { history, windowMeanWaitMs } from '../lib/stores/history.svelte';
-  import { windowSpanMs } from '../lib/queue';
   import { navigatePanel } from '../lib/router';
 
   const sys = $derived(overview.data?.system);
@@ -40,10 +38,10 @@
 
   // Present only while the request queue is enabled.
   const q = $derived(overview.data?.queue);
-  // Mean over the same window the chart shows, not since boot: it should
-  // reflect how the queue is behaving now and settle once it drains.
-  const queueMeanMs = $derived(windowMeanWaitMs(history.samples));
-  const queueSpanMs = $derived(windowSpanMs(history.samples));
+  // Since boot, like Avg latency and Latency range: every wait that ended,
+  // including ones that timed out or whose client left.
+  const queueWaits = $derived(q?.waits_completed ?? 0);
+  const queueAvgMs = $derived(queueWaits > 0 && q ? q.wait_total_ms / queueWaits : null);
 
   // endpoints_up arrives as a pre-formatted "x/y" string; split for the tile.
   const upTotal = $derived(sys?.endpoints_up ?? '/');
@@ -355,12 +353,12 @@
               peak {fmtInt(q.peak_depth)}{#if q.timed_out + q.rejected_full > 0}{' · '}{fmtInt(q.timed_out + q.rejected_full)} turned away{/if}
             {/snippet}
           </StatTile>
-          <StatTile label="Mean queue wait">
+          <StatTile label="Queue avg wait">
             {#snippet children()}
-              {#if queueMeanMs !== null}{fmtMs(queueMeanMs)}{:else}<span class="dash">—</span>{/if}
+              {#if queueAvgMs !== null}{fmtMs(queueAvgMs)}{:else}<span class="dash">—</span>{/if}
             {/snippet}
             {#snippet subSnippet()}
-              {#if queueSpanMs > 0}over the last {fmtDuration(queueSpanMs)}{:else}gathering data{/if}{#if queueMeanMs === null && queueSpanMs > 0}{' · '}nothing queued{/if}
+              {#if queueWaits > 0}across {fmtInt(queueWaits)} queued {queueWaits === 1 ? 'request' : 'requests'}{:else}nothing queued yet{/if}
             {/snippet}
           </StatTile>
         {/if}
@@ -396,6 +394,14 @@
           {/snippet}
           {#snippet subSnippet()}fleet min–max{/snippet}
         </StatTile>
+        {#if q}
+          <StatTile label="Queue wait range">
+            {#snippet children()}
+              {#if queueWaits > 0}{fmtMs(q.min_wait_ms ?? 0)}–{fmtMs(q.max_wait_ms ?? 0)}{:else}<span class="dash">—</span>{/if}
+            {/snippet}
+            {#snippet subSnippet()}queued min–max{/snippet}
+          </StatTile>
+        {/if}
         <StatTile label="Backend types">
           {#snippet children()}
             {#if backendBreakdown.length > 0}

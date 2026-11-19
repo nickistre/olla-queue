@@ -121,10 +121,12 @@ type StatusResponse struct {
 
 // QueueSummary rides on /internal/status so the dashboard's overview poll (and
 // the chart history built from it) gets queue depth without a second request.
-// Absent when the queue is disabled. The wait counters are monotonic so the
-// dashboard can take a windowed mean from two samples.
+// Absent when the queue is disabled. Wait figures cover every wait since boot,
+// like the endpoint latency figures beside them on the overview.
 type QueueSummary struct {
 	WaitTotalMs    float64 `json:"wait_total_ms"`
+	MinWaitMs      float64 `json:"min_wait_ms"`
+	MaxWaitMs      float64 `json:"max_wait_ms"`
 	WaitsCompleted uint64  `json:"waits_completed"`
 	TimedOut       uint64  `json:"timed_out"`
 	RejectedFull   uint64  `json:"rejected_full"`
@@ -209,6 +211,8 @@ func (a *Application) buildQueueSummary() *QueueSummary {
 		PeakDepth:      qs.PeakDepth,
 		MaxSize:        qs.MaxSize,
 		WaitTotalMs:    qs.WaitTotalMs,
+		MinWaitMs:      qs.MinWaitMs,
+		MaxWaitMs:      qs.MaxWaitMs,
 		WaitsCompleted: qs.WaitsCompleted,
 		TimedOut:       qs.TimedOut,
 		RejectedFull:   qs.RejectedFull,
@@ -661,6 +665,8 @@ func hashStatusResponse(resp *StatusResponse) string {
 		hashEtagInt64(h, int64(q.MaxSize))
 		hashEtagInt64(h, int64(q.WaitTotalMs))
 		hashEtagInt64(h, int64(q.WaitsCompleted))
+		hashEtagInt64(h, int64(q.MinWaitMs))
+		hashEtagInt64(h, int64(q.MaxWaitMs))
 		hashEtagInt64(h, int64(q.TimedOut))
 		hashEtagInt64(h, int64(q.RejectedFull))
 	} else {

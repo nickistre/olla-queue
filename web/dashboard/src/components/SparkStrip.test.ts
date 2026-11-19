@@ -33,8 +33,6 @@ function makeSample(over: Partial<Sample> = {}): Sample {
     totalBytes: 0,
     activeConnections: 0,
     queueDepth: null,
-    queueWaitTotalMs: 0,
-    queueWaitsCompleted: 0,
     reqPerSec: 0,
     bytesPerSec: 0,
     ...over,

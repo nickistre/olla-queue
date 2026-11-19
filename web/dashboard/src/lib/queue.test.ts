@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { queueRows, fmtClockTime, slotFillPct, windowSpanMs, slotLines, slotStatus, slotStatusRank } from './queue';
-import { windowMeanWaitMs, type Sample } from './stores/history.svelte';
+import { queueRows, fmtClockTime, slotFillPct, slotLines, slotStatus, slotStatusRank } from './queue';
 import { parseQueue } from './runtime';
 import type { QueueEndpointStats, QueueWaiter } from './types';
 
@@ -16,19 +15,6 @@ const waiter = (o: Partial<QueueWaiter> = {}): QueueWaiter => ({
   holding: false,
   cold: false,
   swap_grace: false,
-  ...o,
-});
-
-const sample = (o: Partial<Sample> = {}): Sample => ({
-  t: 0,
-  totalRequests: 0,
-  totalBytes: 0,
-  activeConnections: 0,
-  queueDepth: 0,
-  queueWaitTotalMs: 0,
-  queueWaitsCompleted: 0,
-  reqPerSec: 0,
-  bytesPerSec: 0,
   ...o,
 });
 
@@ -69,49 +55,6 @@ describe('queue formatting helpers', () => {
     expect(slotFillPct(9, 4)).toBe(100);
   });
 
-  it('windowSpanMs ignores error samples', () => {
-    expect(windowSpanMs([sample({ t: 0 })])).toBe(0);
-    expect(windowSpanMs([sample({ t: 0 }), sample({ t: 5000, error: true }), sample({ t: 10000 })])).toBe(10000);
-  });
-});
-
-describe('windowMeanWaitMs', () => {
-  it('divides wait accrued in the window by requests that left in it', () => {
-    const list = [
-      sample({ queueWaitTotalMs: 1000, queueWaitsCompleted: 2 }),
-      sample({ queueWaitTotalMs: 4000, queueWaitsCompleted: 4 }),
-      sample({ queueWaitTotalMs: 7000, queueWaitsCompleted: 5 }),
-    ];
-    // (7000-1000) / (5-2)
-    expect(windowMeanWaitMs(list)).toBe(2000);
-  });
-
-  it('is null when nothing left the queue in the window', () => {
-    expect(windowMeanWaitMs([sample({ queueWaitsCompleted: 3 }), sample({ queueWaitsCompleted: 3 })])).toBeNull();
-  });
-
-  it('is null when the queue is off', () => {
-    expect(windowMeanWaitMs([sample({ queueDepth: null }), sample({ queueDepth: null })])).toBeNull();
-  });
-
-  it('starts a fresh window after a restart instead of going negative', () => {
-    const list = [
-      sample({ queueWaitTotalMs: 90000, queueWaitsCompleted: 30 }),
-      // restart: counters back near zero
-      sample({ queueWaitTotalMs: 100, queueWaitsCompleted: 1 }),
-      sample({ queueWaitTotalMs: 700, queueWaitsCompleted: 3 }),
-    ];
-    expect(windowMeanWaitMs(list)).toBe(300);
-  });
-
-  it('skips failed polls', () => {
-    const list = [
-      sample({ queueWaitTotalMs: 0, queueWaitsCompleted: 0 }),
-      sample({ error: true, queueDepth: null }),
-      sample({ queueWaitTotalMs: 500, queueWaitsCompleted: 1 }),
-    ];
-    expect(windowMeanWaitMs(list)).toBe(500);
-  });
 });
 
 describe('parseQueue', () => {

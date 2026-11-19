@@ -226,6 +226,8 @@ type queueCounters struct {
 	failed       atomic.Uint64
 	waitTotalNs  atomic.Int64
 	waitMaxNs    atomic.Int64
+	// waitMinNs is 0 until the first wait completes; see storeMin.
+	waitMinNs atomic.Int64
 	// waitsDone counts requests that have left the queue for any reason, the
 	// divisor for waitTotalNs. enqueued would over-count while some still wait.
 	waitsDone atomic.Uint64
@@ -465,6 +467,7 @@ func (q *QueueWrapper) recordWait(outcome *domain.QueueOutcome, waited time.Dura
 	q.stats.waitTotalNs.Add(int64(waited))
 	q.stats.waitsDone.Add(1)
 	storeMax(&q.stats.waitMaxNs, int64(waited))
+	storeMin(&q.stats.waitMinNs, int64(waited))
 	// Accumulate: a retry after a failed attempt may queue again, and the
 	// client cares about the total time spent waiting.
 	if outcome != nil {
@@ -1272,6 +1275,20 @@ func storeMax(v *atomic.Int64, n int64) {
 	}
 }
 
+// storeMin lowers v to n, treating 0 as unset: a completed wait always takes
+// some time, so a real minimum is never 0.
+func storeMin(v *atomic.Int64, n int64) {
+	if n <= 0 {
+		n = 1
+	}
+	for {
+		cur := v.Load()
+		if (cur != 0 && n >= cur) || v.CompareAndSwap(cur, n) {
+			return
+		}
+	}
+}
+
 // QueueModelStats is one model's slot use on an endpoint. Slots is 0 when the
 // backend reported no limit for the model (it is then bounded only by the
 // endpoint-wide limit).
@@ -1357,6 +1374,8 @@ type QueueStats struct {
 	TimeoutSeconds float64              `json:"timeout_seconds"`
 	AvgWaitMs      float64              `json:"avg_wait_ms"`
 	MaxWaitMs      float64              `json:"max_wait_ms"`
+	// MinWaitMs is the shortest wait since boot; 0 until one completes.
+	MinWaitMs float64 `json:"min_wait_ms"`
 	// WaitTotalMs and WaitsCompleted are monotonic counters, so a poller can
 	// derive the mean wait over any window from two samples.
 	WaitTotalMs    float64 `json:"wait_total_ms"`
@@ -1465,6 +1484,7 @@ func (q *QueueWrapper) Stats() QueueStats {
 		Failed:           q.stats.failed.Load(),
 		AvgWaitMs:        avgMs,
 		MaxWaitMs:        float64(q.stats.waitMaxNs.Load()) / float64(time.Millisecond),
+		MinWaitMs:        float64(q.stats.waitMinNs.Load()) / float64(time.Millisecond),
 		WaitTotalMs:      float64(waitTotalNs) / float64(time.Millisecond),
 		WaitsCompleted:   done,
 		HoldKept:         q.stats.holdKept.Load(),

@@ -231,7 +231,7 @@ The client IP honours `X-Forwarded-For` / `X-Real-IP` only from `server.rate_lim
 
 While the queue is on, the dashboard at `/internal/ui/` shows it in three places:
 - **Activity chart:** a dashed queue-depth line, with the current depth in the readout.
-- **Overview tiles:** "Queued requests" (depth against `max_size`) and "Mean queue wait". The mean covers the chart's window (about 15 minutes), so it reflects current conditions and clears once the queue drains.
+- **Overview tiles:** "Queued requests" (depth against `max_size`), and "Queue avg wait" and "Queue wait range" (min–max), which match "Avg latency" and "Latency range". Both cover every wait since startup, including requests that timed out or whose client left while waiting.
 - **Queue tab:** the waiting requests and each endpoint's slot usage, including where its limit came from and each model's use against its own limit. An endpoint with slot groups gets one row per group, labelled `endpoint (group)`, plus an `endpoint (ungrouped)` row for models outside every group. Each row has a status:
   - **Available**: a slot is free.
   - **Busy**: every slot is taken, or, for a group, the endpoint's `max_concurrent` is reached. New requests wait.

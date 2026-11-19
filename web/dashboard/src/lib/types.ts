@@ -81,10 +81,12 @@ export interface EndpointResponse {
 }
 
 // handler_status.go QueueSummary. Present only while the request queue is
-// enabled. wait_total_ms and waits_completed are monotonic counters, so a
-// windowed mean wait comes from the difference between two samples.
+// enabled. Wait figures cover every wait since boot; min/max are 0 until one
+// completes.
 export interface QueueSummary {
   wait_total_ms: number;
+  min_wait_ms: number;
+  max_wait_ms: number;
   waits_completed: number;
   timed_out: number;
   rejected_full: number;
