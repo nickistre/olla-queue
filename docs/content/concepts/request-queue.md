@@ -173,7 +173,7 @@ proxy:
 - `queue_after` needs `proxy.queue.enabled`, and must be shorter than `proxy.queue.timeout`. Both are checked at startup.
 - A hosted service can't report slots. Set `discover_slots: false` on it so the queue doesn't probe it every `slot_refresh_interval`.
 
-The Queue tab tags an overflow endpoint **after 5m** (its delay).
+The Queue tab tags an overflow endpoint **after 5m** (its delay), and an **Overflowed** tile counts the requests sent to overflow endpoints since startup, per endpoint. The same counts are `overflowed` in `/internal/stats/queue`, overall and on each endpoint.
 
 ## Traffic from other clients
 

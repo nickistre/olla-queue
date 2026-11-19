@@ -188,6 +188,7 @@ export const parseQueue = guarded((raw: unknown): QueueStatsResponse | null => {
     health: str(e.health),
     down: e.down === true,
     queue_after_seconds: num(e.queue_after_seconds),
+    overflowed: num(e.overflowed),
     models: arr(e.models)
       .filter(isObj)
       .map(
@@ -238,6 +239,7 @@ export const parseQueue = guarded((raw: unknown): QueueStatsResponse | null => {
     hold_moved: num(raw.hold_moved),
     hold_seconds: num(raw.hold_seconds),
     swap_grace_seconds: num(raw.swap_grace_seconds),
+    overflowed: num(raw.overflowed),
     enqueued: num(raw.enqueued),
     dispatched: num(raw.dispatched),
     timed_out: num(raw.timed_out),

@@ -281,6 +281,8 @@ export interface QueueEndpointStats {
   // queue_after: requests use this endpoint only once they have waited this
   // long (an overflow endpoint). 0 = no delay.
   queue_after_seconds: number;
+  // Requests sent to this endpoint as an overflow one, since boot.
+  overflowed: number;
   models: QueueModelStats[];
   groups: QueueGroupStats[];
 }
@@ -315,6 +317,8 @@ export interface QueueStatsResponse {
   hold_kept: number;
   hold_moved: number;
   hold_seconds: number;
+  // Requests sent to any overflow endpoint (queue_after), since boot.
+  overflowed: number;
   // proxy.queue.swap_grace; 0 when off.
   swap_grace_seconds: number;
   enqueued: number;

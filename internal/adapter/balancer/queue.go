@@ -210,9 +210,11 @@ type QueueWrapper struct {
 	holdFor time.Duration
 	// grace holds, per swap domain (slot group, else endpoint), when the swap
 	// grace for the model that last finished there ends; see startGraceLocked.
-	grace  map[string]swapGrace
-	mu     sync.Mutex
-	closed bool
+	grace map[string]swapGrace
+	// overflowed counts requests sent to each overflow endpoint, by URL.
+	overflowed map[string]uint64
+	mu         sync.Mutex
+	closed     bool
 }
 
 type queueCounters struct {
@@ -232,6 +234,8 @@ type queueCounters struct {
 	// pinned endpoint; holdMoved those that went elsewhere despite a pin.
 	holdKept  atomic.Uint64
 	holdMoved atomic.Uint64
+	// overflowed counts requests sent to an endpoint with queue_after.
+	overflowed atomic.Uint64
 }
 
 // NewQueueWrapper wraps inner with a slot-limited request queue. A nil resolver
@@ -257,6 +261,7 @@ func NewQueueWrapper(inner domain.EndpointSelector, cfg config.QueueConfig, reso
 		known:         make(map[string]*domain.Endpoint),
 		down:          make(map[string]time.Time),
 		grace:         make(map[string]swapGrace),
+		overflowed:    make(map[string]uint64),
 		modelOf:       requestedModel,
 	}
 }
@@ -1039,6 +1044,10 @@ func (q *QueueWrapper) reserveLocked(ctx context.Context, free []*domain.Endpoin
 	if res.group != "" {
 		q.groupInUse[modelKey(res.url, res.group)]++
 	}
+	if ep.QueueAfter > 0 {
+		q.overflowed[res.url]++
+		q.stats.overflowed.Add(1)
+	}
 	claimed := *ep
 	q.reservations[&claimed] = res
 	return &claimed, nil
@@ -1307,6 +1316,8 @@ type QueueEndpointStats struct {
 	// QueueAfterSeconds is the endpoint's queue_after: requests use it only
 	// once they have waited this long. 0 = no delay.
 	QueueAfterSeconds float64 `json:"queue_after_seconds"`
+	// Overflowed counts requests sent to this endpoint as an overflow one.
+	Overflowed uint64 `json:"overflowed"`
 }
 
 // Slot group states for QueueGroupStats.State.
@@ -1355,6 +1366,9 @@ type QueueStats struct {
 	HoldKept    uint64  `json:"hold_kept"`
 	HoldMoved   uint64  `json:"hold_moved"`
 	HoldSeconds float64 `json:"hold_seconds"`
+	// Overflowed counts requests sent to an overflow endpoint (queue_after),
+	// whether they waited out its delay or it was waived.
+	Overflowed uint64 `json:"overflowed"`
 	// SwapGraceSeconds is proxy.queue.swap_grace; 0 when off.
 	SwapGraceSeconds float64 `json:"swap_grace_seconds"`
 	Enqueued         uint64  `json:"enqueued"`
@@ -1394,6 +1408,7 @@ func (q *QueueWrapper) Stats() QueueStats {
 			Models:            q.modelStatsLocked(ep),
 			Groups:            q.groupStatsLocked(ep),
 			QueueAfterSeconds: ep.QueueAfter.Seconds(),
+			Overflowed:        q.overflowed[url],
 		})
 	}
 	waiting := make([]QueueWaiterStats, 0, depth)
@@ -1454,6 +1469,7 @@ func (q *QueueWrapper) Stats() QueueStats {
 		WaitsCompleted:   done,
 		HoldKept:         q.stats.holdKept.Load(),
 		HoldMoved:        q.stats.holdMoved.Load(),
+		Overflowed:       q.stats.overflowed.Load(),
 		HoldSeconds:      q.holdFor.Seconds(),
 		SwapGraceSeconds: q.swapGraceSeconds(),
 		Endpoints:        eps,

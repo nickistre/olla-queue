@@ -221,6 +221,21 @@ describe('QueuePanel overflow endpoints', () => {
     expect(tags.map((t) => t.textContent)).toEqual(['after 5m']);
     expect(tags[0].closest('td')?.textContent).toContain('spill');
   });
+
+  it('counts requests sent to overflow endpoints, per endpoint', async () => {
+    const spill = { ...taki.endpoints[0], name: 'spill', url: 'http://spill:1', groups: [], models: [], queue_after_seconds: 300, overflowed: 5 };
+    const spare = { ...spill, name: 'spare', url: 'http://spare:1', overflowed: 2 };
+    await renderWith({ ...busy, overflowed: 7, endpoints: [busy.endpoints[0], spill, spare] }, () =>
+      expect(queue.data?.overflowed).toBe(7),
+    );
+    expect(document.body.textContent?.replace(/\s+/g, ' ')).toContain('Overflowed 7');
+    expect(document.body.textContent?.replace(/\s+/g, ' ')).toContain('spill 5 · spare 2');
+  });
+
+  it('hides the overflow tile without overflow endpoints', async () => {
+    await renderWith(busy, () => expect(queue.data?.endpoints?.length).toBe(1));
+    expect(document.body.textContent).not.toContain('Overflowed');
+  });
 });
 
 describe('QueuePanel stage 2 tags', () => {

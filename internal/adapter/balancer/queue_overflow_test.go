@@ -42,8 +42,12 @@ func TestQueue_OverflowEndpointOnlyAfterQueueAfter(t *testing.T) {
 	if waited := time.Since(start); waited < 50*time.Millisecond {
 		t.Fatalf("overflowed after %s, before queue_after", waited)
 	}
-	if s := q.Stats(); s.Endpoints[1].Name != "overflow" || s.Endpoints[1].QueueAfterSeconds != 0.06 {
+	s := q.Stats()
+	if s.Endpoints[1].Name != "overflow" || s.Endpoints[1].QueueAfterSeconds != 0.06 || s.Endpoints[1].Overflowed != 1 {
 		t.Fatalf("endpoint stats: %+v", s.Endpoints)
+	}
+	if s.Overflowed != 1 || s.Endpoints[0].Overflowed != 0 {
+		t.Fatalf("overflow counters: total %d, local %d", s.Overflowed, s.Endpoints[0].Overflowed)
 	}
 }
 
@@ -82,6 +86,9 @@ func TestQueue_OverflowIsLastResort(t *testing.T) {
 	first, err := q.Select(agedCtx(time.Minute), eps)
 	if err != nil || first.URLString != local.URLString {
 		t.Fatalf("local should be preferred: %v %v", first, err)
+	}
+	if n := q.Stats().Overflowed; n != 0 {
+		t.Fatalf("a local dispatch counted as overflow: %d", n)
 	}
 	// A retry that already waited past queue_after may overflow at once.
 	second, err := q.Select(agedCtx(time.Minute), eps)

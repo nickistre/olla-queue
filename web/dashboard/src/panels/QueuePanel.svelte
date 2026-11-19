@@ -34,6 +34,9 @@
   const now = $derived(liveNow());
   const rows = $derived<QueueRow[]>(queueRows(data?.waiting ?? [], now));
   const oldestMs = $derived(rows.length > 0 ? Math.max(...rows.map((r) => r.waited_ms)) : 0);
+  // Overflow endpoints (queue_after), plus any that took requests before a
+  // config change dropped their delay. The tile only shows when there are any.
+  const overflowEps = $derived((data?.endpoints ?? []).filter((e) => e.queue_after_seconds > 0 || e.overflowed > 0));
 
   // Waiting requests: position order by default, which is also dispatch
   // order apart from skip-ahead for requests whose endpoints are all busy.
@@ -201,6 +204,16 @@
               >{/if}
           {/snippet}
         </StatTile>
+        {#if overflowEps.length > 0}
+          <StatTile label="Overflowed" value={fmtInt(data.overflowed)}>
+            {#snippet subSnippet()}
+              <span title="Requests sent to an overflow endpoint (queue_after) since boot: after waiting out its delay, or at once when no other endpoint for them was up"
+                >{#each overflowEps as e, i (e.url)}{i > 0 ? ' · ' : ''}{e.name}
+                  {fmtInt(e.overflowed)}{/each}</span
+              >
+            {/snippet}
+          </StatTile>
+        {/if}
         <StatTile label="Turned away" value={fmtInt(data.timed_out + data.rejected_full)}>
           {#snippet subSnippet()}
             {fmtInt(data.timed_out)} timed out · {fmtInt(data.rejected_full)} queue full{#if data.cancelled > 0}{' · '}{fmtInt(data.cancelled)} left{/if}

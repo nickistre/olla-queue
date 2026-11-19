@@ -157,6 +157,7 @@ const endpoint = (o: Partial<QueueEndpointStats> = {}): QueueEndpointStats => ({
   health: 'healthy',
   down: false,
   queue_after_seconds: 0,
+  overflowed: 0,
   models: [],
   groups: [],
   ...o,
