@@ -203,6 +203,7 @@ func (r *StaticEndpointRepository) LoadFromConfig(ctx context.Context, configs [
 			NextCheckTime:         now,
 			PreservePath:          cfg.PreservePath,
 			MaxConcurrent:         cfg.MaxConcurrent,
+			QueueAfter:            cfg.QueueAfter,
 			SlotGroups:            slotGroups(cfg.SlotGroups),
 		}
 

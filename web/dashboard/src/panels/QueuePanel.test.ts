@@ -213,6 +213,16 @@ describe('QueuePanel slot groups', () => {
   });
 });
 
+describe('QueuePanel overflow endpoints', () => {
+  it('tags an endpoint with queue_after', async () => {
+    const overflow = { ...taki.endpoints[0], name: 'spill', url: 'http://spill:1', groups: [], models: [], queue_after_seconds: 300 };
+    await renderWith({ ...busy, endpoints: [busy.endpoints[0], overflow] }, () => expect(queue.data?.endpoints?.length).toBe(2));
+    const tags = [...document.querySelectorAll('.tag-after')];
+    expect(tags.map((t) => t.textContent)).toEqual(['after 5m']);
+    expect(tags[0].closest('td')?.textContent).toContain('spill');
+  });
+});
+
 describe('QueuePanel stage 2 tags', () => {
   it('tags a holding request and a cold one, and shows hold counters', async () => {
     await renderWith(busy, () => expect(queue.data?.hold_kept).toBe(4));

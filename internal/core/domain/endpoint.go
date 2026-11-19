@@ -60,7 +60,10 @@ type Endpoint struct {
 	CheckTimeout  time.Duration
 	Priority      int
 	// MaxConcurrent is the configured slot override for the request queue; 0 = automatic.
-	MaxConcurrent       int
+	MaxConcurrent int
+	// QueueAfter is how long a request must have waited in the queue before it
+	// may use this endpoint; 0 = no delay.
+	QueueAfter          time.Duration
 	ConsecutiveFailures int
 	BackoffMultiplier   int
 	PreservePath        bool

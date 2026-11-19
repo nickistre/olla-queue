@@ -392,6 +392,7 @@ discovery:
 | `static.endpoints[].headers` | map[string]string | No | Custom outbound headers applied on every forwarded request |
 | `static.endpoints[].slot_groups` | list | No | Request queue capacity pools on this endpoint: each `{name, models: [globs], max_concurrent}`. A model joins the first matching group; see [Slot groups](../concepts/request-queue.md#slot-groups) |
 | `static.endpoints[].max_concurrent` | int | No | Request queue slot limit for this endpoint; `0` (default) = discover or use `proxy.queue.default_slots`. Only used when `proxy.queue.enabled` is true |
+| `static.endpoints[].queue_after` | duration | No | Makes this an [overflow endpoint](../concepts/request-queue.md#overflow-endpoints): a request uses it only after waiting this long in the queue, or when no other endpoint for it is up. `0` (default) = no delay. Needs `proxy.queue.enabled`; must be shorter than `proxy.queue.timeout` |
 
 #### Endpoint Authentication (`auth:`)
 

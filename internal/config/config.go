@@ -560,6 +560,23 @@ func parseByteSize(s string) (int64, error) {
 	return size, nil
 }
 
+// validateQueueAfter is enforced even with the queue off: without the queue
+// the delay can't be honoured, and the overflow endpoint would take traffic
+// straight away.
+func (c *Config) validateQueueAfter(ep EndpointConfig) error {
+	switch d := ep.QueueAfter; {
+	case d < 0:
+		return fmt.Errorf("endpoint %q queue_after must be >= 0 (0 = no delay), got %s", ep.Name, d)
+	case d == 0:
+		return nil
+	case !c.Proxy.Queue.Enabled:
+		return fmt.Errorf("endpoint %q queue_after needs proxy.queue.enabled: without the queue it can't hold requests back", ep.Name)
+	case d >= c.Proxy.Queue.Timeout:
+		return fmt.Errorf("endpoint %q queue_after (%s) must be shorter than proxy.queue.timeout (%s), or requests time out before it can take them", ep.Name, d, c.Proxy.Queue.Timeout)
+	}
+	return nil
+}
+
 // validateQueue checks proxy.queue and the per-endpoint max_concurrent it reads.
 // Queue fields are only enforced when the queue is on, so a half-filled block
 // left disabled never blocks startup.
@@ -569,6 +586,9 @@ func (c *Config) validateQueue() error {
 			return fmt.Errorf("endpoint %q max_concurrent must be >= 0 (0 = automatic), got %d", ep.Name, ep.MaxConcurrent)
 		}
 		if err := validateSlotGroups(ep); err != nil {
+			return err
+		}
+		if err := c.validateQueueAfter(ep); err != nil {
 			return err
 		}
 	}

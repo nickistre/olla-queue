@@ -146,6 +146,13 @@ type queueWaiter struct {
 	ready     chan queueResult // buffered 1, written once under q.mu
 	elem      *list.Element    // nil once removed from the queue
 	holdTimer *time.Timer
+	// since is enqueuedAt less the time earlier attempts of this request
+	// spent queued, so a retry keeps its age for queue_after and the grace.
+	since time.Time
+	// delayTimer wakes the queue when the request becomes old enough for the
+	// next candidate's queue_after: that endpoint may sit idle, with no
+	// release coming to re-run dispatch.
+	delayTimer *time.Timer
 	// refresher re-runs the handler's endpoint lookup; refresh signals that a
 	// backend recovered and it is worth calling. Both nil when the handler
 	// gave no refresher, so the wait never selects on refresh.
@@ -315,6 +322,10 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 	}
 
 	now := time.Now()
+	since := now
+	if outcome != nil {
+		since = now.Add(-outcome.Wait)
+	}
 	stickyKey, _ := ctx.Value(constants.ContextStickyKeyKey).(string)
 	var holdUntil time.Time
 	if q.holdFor > 0 && stickyKey != "" {
@@ -325,7 +336,7 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 	// leaves no waiter able to use a free slot, so any slot this request can
 	// take now is one no waiter wants. A holding waiter only wants its pinned
 	// endpoint, which it gets first whenever that frees.
-	if free := q.admissibleLocked(ctx, endpoints, stickyKey, holdUntil, now, now); len(free) > 0 {
+	if free := q.admissibleLocked(ctx, endpoints, stickyKey, holdUntil, since, now); len(free) > 0 {
 		ep, err := q.reserveLocked(ctx, free)
 		q.mu.Unlock()
 		return ep, err
@@ -355,6 +366,7 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 		candidates: endpoints,
 		ready:      make(chan queueResult, 1),
 		enqueuedAt: now,
+		since:      since,
 		stickyKey:  stickyKey,
 		holdUntil:  holdUntil,
 	}
@@ -370,6 +382,7 @@ func (q *QueueWrapper) Select(ctx context.Context, endpoints []*domain.Endpoint)
 		// free one may already be sitting idle with no release coming.
 		w.holdTimer = time.AfterFunc(q.holdFor, q.Wake)
 	}
+	q.armDelayTimerLocked(w, now)
 	w.elem = q.waiters.PushBack(w)
 	depth := int64(q.waiters.Len())
 	q.mu.Unlock()
@@ -553,19 +566,22 @@ func (q *QueueWrapper) PurgeDeadEndpoints(routable []*domain.Endpoint) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	now := time.Now()
+	// An endpoint going down can open a door too: with no endpoint without a
+	// queue_after delay left up, overflow endpoints take requests at once.
+	changed := false
 	for url := range q.known {
 		if _, ok := alive[url]; !ok {
 			if _, already := q.down[url]; !already {
 				q.down[url] = now
+				changed = true
 			}
 		}
 	}
-	recovered := false
 	for url := range alive {
 		if _, wasDown := q.down[url]; wasDown {
 			delete(q.down, url)
 			q.signalRefreshLocked(url)
-			recovered = true
+			changed = true
 		}
 	}
 
@@ -585,7 +601,7 @@ func (q *QueueWrapper) PurgeDeadEndpoints(routable []*domain.Endpoint) {
 		}
 		e = next
 	}
-	if recovered {
+	if changed {
 		q.dispatchLocked()
 	}
 }
@@ -656,6 +672,7 @@ func (q *QueueWrapper) addCandidates(w *queueWaiter, eps []*domain.Endpoint) {
 	}
 	// Clip so the append never writes into the retry handler's slice.
 	w.candidates = append(slices.Clip(w.candidates), added...)
+	q.armDelayTimerLocked(w, time.Now())
 	slog.Debug("queued request gained candidates", "added", len(added), "candidates", len(w.candidates))
 	q.dispatchLocked()
 }
@@ -732,7 +749,7 @@ func (q *QueueWrapper) dispatchPassLocked(now time.Time, eligible func(*queueWai
 	for e := q.waiters.Front(); e != nil; {
 		next := e.Next()
 		w := waiterAt(e)
-		if free := q.admissibleLocked(w.ctx, w.candidates, w.stickyKey, w.holdUntil, w.enqueuedAt, now); len(free) > 0 && eligible(w, free) {
+		if free := q.admissibleLocked(w.ctx, w.candidates, w.stickyKey, w.holdUntil, w.since, now); len(free) > 0 && eligible(w, free) {
 			ep, err := q.reserveLocked(w.ctx, free)
 			if err == nil {
 				q.countHoldLocked(w, ep)
@@ -770,6 +787,9 @@ func (q *QueueWrapper) removeLocked(w *queueWaiter) {
 	if w.holdTimer != nil {
 		w.holdTimer.Stop()
 	}
+	if w.delayTimer != nil {
+		w.delayTimer.Stop()
+	}
 }
 
 // admissibleLocked is freeLocked plus swap grace and sticky hold. While a
@@ -778,7 +798,8 @@ func (q *QueueWrapper) removeLocked(w *queueWaiter) {
 // gone or points at an endpoint this request cannot use, any free candidate
 // will do. since is when the request arrived, for the swap grace's age cap.
 func (q *QueueWrapper) admissibleLocked(ctx context.Context, candidates []*domain.Endpoint, stickyKey string, holdUntil, since, now time.Time) []*domain.Endpoint {
-	free := q.graceLocked(ctx, q.freeLocked(ctx, candidates), since, now)
+	age := now.Sub(since)
+	free := q.delayedLocked(candidates, q.graceLocked(ctx, q.freeLocked(ctx, candidates), since, now), age)
 	if holdUntil.IsZero() || !now.Before(holdUntil) || q.pinPeek == nil {
 		return free
 	}
@@ -786,8 +807,9 @@ func (q *QueueWrapper) admissibleLocked(ctx context.Context, candidates []*domai
 	if !ok {
 		return free
 	}
+	// A pin to an overflow endpoint this request can't use yet causes no hold.
 	pinnedIsCandidate := false
-	for _, ep := range candidates {
+	for _, ep := range q.delayedLocked(candidates, candidates, age) {
 		if ep.URLString == pinned && q.upLocked(ep) {
 			pinnedIsCandidate = true
 			break
@@ -802,6 +824,75 @@ func (q *QueueWrapper) admissibleLocked(ctx context.Context, candidates []*domai
 		}
 	}
 	return nil // pinned endpoint busy: wait for it
+}
+
+// delayedLocked drops endpoints from eps whose queue_after this request, of
+// age, hasn't waited out yet. The delay is waived when no candidate without
+// one is up: with nothing else to wait for, waiting only delays the answer.
+func (q *QueueWrapper) delayedLocked(candidates, eps []*domain.Endpoint, age time.Duration) []*domain.Endpoint {
+	if !anyDelayed(eps, age) {
+		return eps
+	}
+	waived := true
+	for _, ep := range candidates {
+		if ep.QueueAfter <= 0 && q.upLocked(ep) {
+			waived = false
+			break
+		}
+	}
+	if waived {
+		return eps
+	}
+	out := eps[:0:0]
+	for _, ep := range eps {
+		if ep.QueueAfter <= age {
+			out = append(out, ep)
+		}
+	}
+	return out
+}
+
+func anyDelayed(eps []*domain.Endpoint, age time.Duration) bool {
+	for _, ep := range eps {
+		if ep.QueueAfter > age {
+			return true
+		}
+	}
+	return false
+}
+
+// lastResort leaves overflow endpoints (queue_after set) out while any other
+// endpoint is free: they relieve a long wait, not share the normal load.
+func lastResort(free []*domain.Endpoint) []*domain.Endpoint {
+	var local []*domain.Endpoint
+	for _, ep := range free {
+		if ep.QueueAfter <= 0 {
+			local = append(local, ep)
+		}
+	}
+	if len(local) == 0 {
+		return free
+	}
+	return local
+}
+
+// armDelayTimerLocked sets w's timer for the next queue_after boundary among
+// its candidates, if one is still ahead.
+func (q *QueueWrapper) armDelayTimerLocked(w *queueWaiter, now time.Time) {
+	age := now.Sub(w.since)
+	var next time.Duration
+	for _, ep := range w.candidates {
+		if d := ep.QueueAfter - age; d > 0 && (next == 0 || d < next) {
+			next = d
+		}
+	}
+	if w.delayTimer != nil {
+		w.delayTimer.Stop()
+		w.delayTimer = nil
+	}
+	if next > 0 {
+		w.delayTimer = time.AfterFunc(next, q.Wake)
+	}
 }
 
 // graceKey names the swap domain model runs in on ep: its slot group, else the
@@ -869,7 +960,7 @@ func (q *QueueWrapper) inGraceLocked(ctx context.Context, ep *domain.Endpoint, n
 // has free endpoints, but each would swap out a model inside its grace.
 func (q *QueueWrapper) graceHeldLocked(w *queueWaiter, now time.Time) bool {
 	free := q.freeLocked(w.ctx, w.candidates)
-	return len(free) > 0 && len(q.graceLocked(w.ctx, free, w.enqueuedAt, now)) == 0
+	return len(free) > 0 && len(q.graceLocked(w.ctx, free, w.since, now)) == 0
 }
 
 // anyLoadedLocked reports whether the request's model is loaded on one of
@@ -920,7 +1011,7 @@ func (q *QueueWrapper) preferLoadedLocked(ctx context.Context, free []*domain.En
 // pointers. The proxy path identifies endpoints by name and URL, never by
 // pointer, so the copy is otherwise indistinguishable.
 func (q *QueueWrapper) reserveLocked(ctx context.Context, free []*domain.Endpoint) (*domain.Endpoint, error) {
-	ep, err := q.inner.Select(ctx, q.preferLoadedLocked(ctx, free))
+	ep, err := q.inner.Select(ctx, q.preferLoadedLocked(ctx, lastResort(free)))
 	if err != nil {
 		return nil, err
 	}
@@ -1070,7 +1161,7 @@ func (q *QueueWrapper) holdingLocked(w *queueWaiter, now time.Time) bool {
 	if !ok {
 		return false
 	}
-	for _, ep := range w.candidates {
+	for _, ep := range q.delayedLocked(w.candidates, w.candidates, now.Sub(w.since)) {
 		if ep.URLString == pinned {
 			return true
 		}
@@ -1198,6 +1289,9 @@ type QueueEndpointStats struct {
 	// Down is set while the queue holds the endpoint as offline: reported by
 	// the health checker or by a failed connection, until it recovers.
 	Down bool `json:"down"`
+	// QueueAfterSeconds is the endpoint's queue_after: requests use it only
+	// once they have waited this long. 0 = no delay.
+	QueueAfterSeconds float64 `json:"queue_after_seconds"`
 }
 
 // Slot group states for QueueGroupStats.State.
@@ -1274,16 +1368,17 @@ func (q *QueueWrapper) Stats() QueueStats {
 		names[url] = ep.Name
 		_, isDown := q.down[url]
 		eps = append(eps, QueueEndpointStats{
-			Health:     ep.Status.String(),
-			Down:       isDown,
-			Name:       ep.Name,
-			URL:        url,
-			Slots:      slots,
-			SlotSource: source,
-			InUse:      q.inUse[url],
-			External:   q.external[url],
-			Models:     q.modelStatsLocked(ep),
-			Groups:     q.groupStatsLocked(ep),
+			Health:            ep.Status.String(),
+			Down:              isDown,
+			Name:              ep.Name,
+			URL:               url,
+			Slots:             slots,
+			SlotSource:        source,
+			InUse:             q.inUse[url],
+			External:          q.external[url],
+			Models:            q.modelStatsLocked(ep),
+			Groups:            q.groupStatsLocked(ep),
+			QueueAfterSeconds: ep.QueueAfter.Seconds(),
 		})
 	}
 	waiting := make([]QueueWaiterStats, 0, depth)

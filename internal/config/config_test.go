@@ -1717,6 +1717,22 @@ func TestQueueConfig_Validate(t *testing.T) {
 			c.Proxy.Queue.Enabled = true
 			c.Proxy.Queue.SwapGrace = 3 * time.Second
 		}},
+		{name: "negative queue_after", wantErr: true, modify: func(c *Config) {
+			c.Proxy.Queue.Enabled = true
+			c.Discovery.Static.Endpoints[0].QueueAfter = -time.Second
+		}},
+		{name: "queue_after with the queue off", wantErr: true, modify: func(c *Config) {
+			c.Proxy.Queue.Enabled = false
+			c.Discovery.Static.Endpoints[0].QueueAfter = time.Second
+		}},
+		{name: "queue_after not shorter than queue timeout", wantErr: true, modify: func(c *Config) {
+			c.Proxy.Queue.Enabled = true
+			c.Discovery.Static.Endpoints[0].QueueAfter = c.Proxy.Queue.Timeout
+		}},
+		{name: "queue_after under queue timeout", modify: func(c *Config) {
+			c.Proxy.Queue.Enabled = true
+			c.Discovery.Static.Endpoints[0].QueueAfter = time.Second
+		}},
 		{name: "negative sticky hold", wantErr: true, modify: func(c *Config) {
 			c.Proxy.Queue.Enabled = true
 			c.Proxy.StickySessions.HoldSeconds = -1

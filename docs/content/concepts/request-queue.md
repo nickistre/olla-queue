@@ -139,6 +139,40 @@ The Queue tab tags a request held this way **grace**.
 
 When several backends have room, the request goes to one with its model already loaded. Next come backends that don't report what they have loaded (Ollama, vLLM and others), and last ones that would have to load the model. The configured `load_balancer` (priority, least connections, round robin) then picks among that set.
 
+### Overflow endpoints
+
+Some endpoints should only take a request that has already waited a while: a paid or remote OpenAI-compatible service, a slow spare machine, a node shared with other work. Set `queue_after` on the endpoint to make it an overflow endpoint, and `max_concurrent` to cap how much it takes at once:
+
+```yaml
+discovery:
+  static:
+    endpoints:
+      - name: spill
+        url: https://example-provider.com/api
+        type: openai-compatible
+        priority: 10
+        auth:
+          type: bearer
+          token: "${SPILL_API_KEY}"
+        max_concurrent: 2
+        queue_after: 5m
+
+proxy:
+  queue:
+    enabled: true
+    timeout: 10m    # must be longer than any queue_after
+```
+
+- A request may use the endpoint only once it has waited `queue_after` in the queue. Local endpoints serve everything else.
+- It's a last resort. When an old enough request finds both a local endpoint free (even one needing a model swap) and the overflow endpoint free, it goes local.
+- When no endpoint without a delay that could serve the request is up, because all are down or the model exists only on the overflow endpoint, the delay is waived. There is nothing to wait for.
+- A retry after a failed attempt keeps the time it already spent queued.
+- A sticky pin to an overflow endpoint doesn't hold a new request there, so a conversation's next turn returns to a local backend.
+- If the remote service names the model differently, map it with a [model alias](model-aliases.md).
+- `queue_after` needs `proxy.queue.enabled`, and must be shorter than `proxy.queue.timeout`. Both are checked at startup.
+
+The Queue tab tags an overflow endpoint **after 5m** (its delay).
+
 ## Traffic from other clients
 
 Olla counts its own requests against each limit, but a backend may also be serving clients that never pass through this Olla, such as another Olla instance or a script calling it directly. Without knowing that, Olla sees a slot as free while the backend is busy. The request then queues inside the backend, out of sight, and can run past `response_header_timeout`.

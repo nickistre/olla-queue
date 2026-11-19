@@ -278,6 +278,9 @@ export interface QueueEndpointStats {
   health: string;
   // The queue holds it as offline (health report or failed connection).
   down: boolean;
+  // queue_after: requests use this endpoint only once they have waited this
+  // long (an overflow endpoint). 0 = no delay.
+  queue_after_seconds: number;
   models: QueueModelStats[];
   groups: QueueGroupStats[];
 }

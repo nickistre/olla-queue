@@ -187,6 +187,7 @@ export const parseQueue = guarded((raw: unknown): QueueStatsResponse | null => {
     external: num(e.external),
     health: str(e.health),
     down: e.down === true,
+    queue_after_seconds: num(e.queue_after_seconds),
     models: arr(e.models)
       .filter(isObj)
       .map(

@@ -366,8 +366,12 @@ type EndpointConfig struct {
 	CheckTimeout  time.Duration     `yaml:"check_timeout"`
 	// MaxConcurrent caps in-flight requests when proxy.queue is enabled.
 	// 0 = resolve automatically (discovered slots, then queue.default_slots).
-	MaxConcurrent int  `yaml:"max_concurrent"`
-	PreservePath  bool `yaml:"preserve_path"`
+	MaxConcurrent int `yaml:"max_concurrent"`
+	// QueueAfter makes this an overflow endpoint: a request may use it only
+	// once it has waited this long in the queue, or when no endpoint without
+	// a delay is up. 0 = no delay. Needs proxy.queue.
+	QueueAfter   time.Duration `yaml:"queue_after"`
+	PreservePath bool          `yaml:"preserve_path"`
 }
 
 // SlotGroupConfig is one capacity pool on an endpoint. A model joins the first

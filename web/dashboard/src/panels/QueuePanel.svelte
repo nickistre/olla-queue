@@ -252,6 +252,11 @@
             <td class="col-sticky" title={endpointTitle(l)}>
               {l.endpoint.name}{#if l.label}{' '}<span class="group-label" class:is-other={l.label === 'ungrouped'}
                   >({l.label})</span
+                >{/if}{#if l.endpoint.queue_after_seconds > 0}{' '}<span
+                  class="tag tag-after"
+                  title="Overflow endpoint: only takes requests that have waited {fmtDuration(
+                    l.endpoint.queue_after_seconds * 1000,
+                  )}, or any request when no other endpoint for it is up">after {fmtDuration(l.endpoint.queue_after_seconds * 1000)}</span
                 >{/if}
             </td>
             <td title={l.reason}>
@@ -337,6 +342,9 @@
   }
   .tag-cold {
     color: var(--blue);
+  }
+  .tag-after {
+    color: var(--text-dim);
   }
   .tag-hold,
   .tag-grace {
