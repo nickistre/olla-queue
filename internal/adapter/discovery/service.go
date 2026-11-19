@@ -36,9 +36,18 @@ type ModelDiscoveryService struct {
 	retryAfter        map[string]time.Time
 	disabledEndpoints map[string]int                  // tracks consecutive failures
 	endpointFilters   map[string]*domain.FilterConfig // per-endpoint filter configs
-	config            DiscoveryConfig
-	mu                sync.RWMutex
-	isRunning         atomic.Bool
+	// modelsUpdated, when set, runs after an endpoint's models are registered,
+	// so queued requests can pick up an endpoint that now serves their model.
+	modelsUpdated atomic.Pointer[func(*domain.Endpoint)]
+	config        DiscoveryConfig
+	mu            sync.RWMutex
+	isRunning     atomic.Bool
+}
+
+// SetModelsUpdatedFn registers fn to run after each successful registration
+// of an endpoint's models.
+func (s *ModelDiscoveryService) SetModelsUpdatedFn(fn func(*domain.Endpoint)) {
+	s.modelsUpdated.Store(&fn)
 }
 
 // DiscoveryConfig holds configuration for the discovery service
@@ -208,6 +217,9 @@ func (s *ModelDiscoveryService) DiscoverEndpoint(ctx context.Context, endpoint *
 
 	s.resetFailureCount(endpoint.URLString)
 	s.logger.InfoWithEndpoint(" ", endpoint.Name, "models", len(filteredModels))
+	if fn := s.modelsUpdated.Load(); fn != nil {
+		(*fn)(endpoint)
+	}
 	return nil
 }
 

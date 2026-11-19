@@ -556,3 +556,25 @@ func createMockEndpoint(urlString, name string) *domain.Endpoint {
 		Status:    domain.StatusHealthy,
 	}
 }
+
+func TestDiscoverEndpointRunsModelsUpdatedHookOnSuccessOnly(t *testing.T) {
+	ep := createMockEndpoint("http://localhost:11434", "ollama-1")
+	for _, failing := range []bool{false, true} {
+		errs := map[string]error{}
+		if failing {
+			errs[ep.URLString] = errors.New("network error")
+		}
+		service := NewModelDiscoveryService(&mockDiscoveryClient{discoveryErrors: errs}, &mockEndpointRepository{},
+			&mockModelRegistry{registeredModels: make([]*domain.ModelInfo, 0)}, DiscoveryConfig{Timeout: 5 * time.Second}, createTestLogger())
+		var got *domain.Endpoint
+		service.SetModelsUpdatedFn(func(e *domain.Endpoint) { got = e })
+
+		_ = service.DiscoverEndpoint(context.Background(), ep)
+		if failing && got != nil {
+			t.Fatal("hook ran after a failed discovery")
+		}
+		if !failing && (got == nil || got.URLString != ep.URLString) {
+			t.Fatalf("hook not run with the endpoint after a successful discovery: %v", got)
+		}
+	}
+}

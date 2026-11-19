@@ -228,3 +228,23 @@ func TestQueue_StatsReportGroupsStateAndDown(t *testing.T) {
 		t.Fatal("endpoint should report down after a failed connection")
 	}
 }
+
+// A node that was up all along but only now serves the model (discovery just
+// registered it) is picked up by requests already waiting.
+func TestQueue_ModelsUpdatedAddsEndpointToWaiters(t *testing.T) {
+	q := makeQueue(t, defaultQueueConfig())
+	a := makeEndpoint("a", "http://a:1")
+	b := makeEndpoint("b", "http://b:1")
+	fillSlots(t, q, a)
+
+	refresh := func(context.Context) []*domain.Endpoint {
+		return []*domain.Endpoint{makeEndpoint("a", "http://a:1"), makeEndpoint("b", "http://b:1")}
+	}
+	ch := selectAsync(refreshCtx(refresh), q, []*domain.Endpoint{a})
+	waitForDepth(t, q, 1)
+
+	q.EndpointModelsUpdated(b)
+	if r := mustReceive(t, ch); r.err != nil || r.endpoint.URLString != b.URLString {
+		t.Fatalf("want dispatch to b after its models were discovered, got %+v", r)
+	}
+}

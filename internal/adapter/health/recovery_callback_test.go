@@ -147,3 +147,25 @@ func TestNoOpRecoveryCallback(t *testing.T) {
 
 	assert.NoError(t, err)
 }
+
+func TestIsRecovery(t *testing.T) {
+	cases := []struct {
+		old, cur domain.EndpointStatus
+		want     bool
+	}{
+		{domain.StatusOffline, domain.StatusHealthy, true},
+		{domain.StatusOffline, domain.StatusBusy, true},
+		{domain.StatusUnhealthy, domain.StatusWarming, true},
+		{domain.StatusConfigError, domain.StatusHealthy, true},
+		{domain.StatusUnknown, domain.StatusHealthy, false},
+		{domain.StatusHealthy, domain.StatusBusy, false},
+		{domain.StatusBusy, domain.StatusHealthy, false},
+		{domain.StatusHealthy, domain.StatusOffline, false},
+		{domain.StatusOffline, domain.StatusOffline, false},
+	}
+	for _, tc := range cases {
+		if got := isRecovery(tc.old, tc.cur); got != tc.want {
+			t.Errorf("isRecovery(%s, %s) = %v, want %v", tc.old, tc.cur, got, tc.want)
+		}
+	}
+}

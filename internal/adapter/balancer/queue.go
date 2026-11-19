@@ -617,6 +617,17 @@ func (q *QueueWrapper) EndpointRecovered(ep *domain.Endpoint) {
 	q.dispatchLocked()
 }
 
+// EndpointModelsUpdated is model discovery's hook: ep's model list was just
+// registered, so it may now serve a model queued requests are waiting for.
+// Those without it re-run their endpoint lookup; the signal coalesces, so a
+// discovery cycle across many endpoints costs each waiter at most one lookup
+// in flight.
+func (q *QueueWrapper) EndpointModelsUpdated(ep *domain.Endpoint) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.signalRefreshLocked(ep.URLString)
+}
+
 // EndpointFailed marks ep down when a connection to it fails. The retry
 // handler calls it before releasing the failed attempt's slot, so the slot
 // isn't handed to a waiter that would hit the same dead backend. The health
@@ -660,7 +671,11 @@ func (q *QueueWrapper) addCandidates(w *queueWaiter, eps []*domain.Endpoint) {
 	}
 	var added []*domain.Endpoint
 	for _, ep := range eps {
-		if _, ok := types[ep.Type]; !ok || hasURL(w.candidates, ep.URLString) {
+		if hasURL(w.candidates, ep.URLString) {
+			continue
+		}
+		if _, ok := types[ep.Type]; !ok {
+			slog.Debug("queued request skipped a new endpoint of another type", "endpoint", ep.Name, "type", ep.Type)
 			continue
 		}
 		q.known[ep.URLString] = ep

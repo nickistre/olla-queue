@@ -233,6 +233,15 @@ func (c *HTTPHealthChecker) checkEndpointSafely(ctx context.Context, endpoint *d
 	c.checkEndpoint(ctx, endpoint)
 }
 
+// isRecovery reports whether a status change brings an endpoint back into
+// service. Busy and Warming count: a node that comes back slow, mid-load or
+// under traffic still takes requests, and queued ones need to hear about it.
+// Unknown is excluded: the first check isn't a recovery, and startup
+// discovery covers it.
+func isRecovery(old, cur domain.EndpointStatus) bool {
+	return old != cur && cur.IsRoutable() && !old.IsRoutable() && old != domain.StatusUnknown
+}
+
 func (c *HTTPHealthChecker) checkEndpoint(ctx context.Context, endpoint *domain.Endpoint) {
 	now := time.Now()
 	result, err := c.healthClient.Check(ctx, endpoint)
@@ -280,8 +289,7 @@ func (c *HTTPHealthChecker) checkEndpoint(ctx context.Context, endpoint *domain.
 		return
 	}
 
-	// Trigger recovery callback if endpoint recovered (transitioned to healthy from unhealthy)
-	if statusChanged && newStatus == domain.StatusHealthy && oldStatus != domain.StatusUnknown {
+	if isRecovery(oldStatus, newStatus) {
 		c.logger.Info("Endpoint recovered, triggering model discovery refresh",
 			"endpoint", endpoint.Name,
 			"was", oldStatus.String())

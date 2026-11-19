@@ -193,7 +193,7 @@ The HTTP transport carries its own circuit breaker that trips after `3` consecut
 
 When an endpoint recovers from an unhealthy state, Olla automatically:
 
-1. **Detects Recovery**: Health check transitions from unhealthy to healthy
+1. **Detects Recovery**: Health check moves from an unroutable status (offline, unhealthy) to a routable one (healthy, busy or warming)
 2. **Triggers Discovery**: Automatically initiates model discovery
 3. **Updates Catalog**: Refreshes the unified model catalog with latest models
 4. **Resumes Routing**: Endpoint is immediately available for request routing

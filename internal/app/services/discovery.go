@@ -42,6 +42,9 @@ type DiscoveryService struct {
 	// recoveredFn, when set, is called after a backend recovers (and its models
 	// are rediscovered), so the request queue can hand it to waiting requests.
 	recoveredFn atomic.Pointer[func(*domain.Endpoint)]
+	// modelsUpdatedFn, when set, is called after an endpoint's models are
+	// (re)discovered, so queued requests can gain it as a candidate.
+	modelsUpdatedFn atomic.Pointer[func(*domain.Endpoint)]
 }
 
 // NewDiscoveryService creates a new discovery service
@@ -162,6 +165,12 @@ func (s *DiscoveryService) Start(ctx context.Context) error {
 			RetryBackoff:      s.config.ModelDiscovery.RetryBackoff,
 		}
 		s.modelDiscovery = discovery.NewModelDiscoveryService(client, s.endpointRepo, s.registry, discoveryConfig, s.logger)
+		// Indirect, so the proxy layer can wire its hook before or after Start.
+		s.modelDiscovery.SetModelsUpdatedFn(func(ep *domain.Endpoint) {
+			if fn := s.modelsUpdatedFn.Load(); fn != nil {
+				(*fn)(ep)
+			}
+		})
 
 		if err := s.modelDiscovery.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start model discovery: %w", err)
@@ -305,6 +314,12 @@ func (s *DiscoveryService) SetPurgeDeadEndpointsFn(fn func([]*domain.Endpoint)) 
 // after its models have been rediscovered.
 func (s *DiscoveryService) SetEndpointRecoveredFn(fn func(*domain.Endpoint)) {
 	s.recoveredFn.Store(&fn)
+}
+
+// SetModelsUpdatedFn registers a function to call after an endpoint's models
+// are discovered, by the periodic cycle or a recovery.
+func (s *DiscoveryService) SetModelsUpdatedFn(fn func(*domain.Endpoint)) {
+	s.modelsUpdatedFn.Store(&fn)
 }
 
 // UpdateEndpointStatus updates the status of an endpoint in the repository
