@@ -50,11 +50,13 @@ Resolved in this order:
 
 Model limits are only ever discovered. Discovery applies to `llamacpp`, `openai-compatible` and `openai` endpoints, including ones with `max_concurrent` set:
 
-- **llama-swap**: `GET /running` lists the loaded models. Olla asks each `ready` model for `GET /props?model=<id>&autoload=false` and records its `total_slots`.
-- **llama.cpp router mode** (`--models-dir` / `--models-preset`): `GET /models` lists models with a `status`. Each `loaded` one is asked for `/props?model=<id>&autoload=false` the same way.
+- **llama-swap**: `GET /running` lists the loaded models. Olla asks each newly `ready` model for `GET /props?model=<id>&autoload=false` and records its `total_slots`.
+- **llama.cpp router mode** (`--models-dir` / `--models-preset`): `GET /models` lists models with a `status`. Each newly `loaded` one is asked for `/props?model=<id>&autoload=false` the same way.
 - **llama.cpp, single model**: `GET /props` gives `total_slots` (the server's `--parallel`). With only one model there is no separate per-model limit.
 
-`autoload=false` means a probe never loads or swaps a model.
+Only models the backend already reports as loaded are probed, so a probe never loads or swaps a model. llama.cpp router mode also honours `autoload=false`; llama-swap ignores it.
+
+A model is probed once per load, not on every refresh. While it stays loaded with the same identity (llama-swap's `/running` `cmd`, which includes `--parallel`, or a router's `status.args`), its count is reused. This matters on llama-swap. Every request it dispatches to a model, a `GET /props` included, resets that model's `ttl` idle timer. A probe every `slot_refresh_interval` would therefore stop a loaded model from ever unloading. A model whose identity changes is probed again, and so is one that unloads and comes back. A backend that reports no identity is probed on every refresh, as before.
 
 On a multi-model node, a model that isn't loaded gets a limit of **1** until the backend reports it ready (the cold-model gate). The first request starts the load. Further requests wait in Olla's queue rather than piling up behind the load inside the backend. The model's real slot count is learnt as soon as it is ready.
 
@@ -87,7 +89,7 @@ discovery:
 
 The model name is the one the backend serves. If an [alias](model-aliases.md) maps to different names on different endpoints, each endpoint's limit is looked up under its own name.
 
-Discovered counts refresh every `queue.slot_refresh_interval`. An endpoint can set its own `slot_refresh_interval`, or turn discovery off with `discover_slots: false`. Turning it off is useful for an endpoint that would only answer the probes with errors, such as a hosted service; it then uses `max_concurrent` or `default_slots`, and gets no [external load](#traffic-from-other-clients) tracking. A failed probe keeps the last known value. When a model is unloaded, its limit is dropped on the next refresh. If nothing is loaded, the endpoint falls back to `default_slots` rather than 0. When a refresh finds more slots, waiting requests are dispatched straight away.
+The list of loaded models refreshes every `queue.slot_refresh_interval`, and newly loaded models are probed then. An endpoint can set its own `slot_refresh_interval`, or turn discovery off with `discover_slots: false`. Turning it off is useful for an endpoint that would only answer the probes with errors, such as a hosted service; it then uses `max_concurrent` or `default_slots`, and gets no [external load](#traffic-from-other-clients) tracking. A failed probe keeps the last known value. When a model is unloaded, its limit is dropped on the next refresh. If nothing is loaded, the endpoint falls back to `default_slots` rather than 0. When a refresh finds more slots, waiting requests are dispatched straight away.
 
 For backends that can't be probed (Ollama, vLLM, SGLang and others), set `max_concurrent` to match the backend's own concurrency, for example `OLLAMA_NUM_PARALLEL`.
 

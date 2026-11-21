@@ -326,7 +326,7 @@ Caps in-flight requests per endpoint and holds the overflow in a FIFO queue unti
 | `queue.timeout` | duration | `60s` | Longest a request waits for a slot before a 503 + `Retry-After` |
 | `queue.default_slots` | int | `1` | Slots for an endpoint with no `max_concurrent` and no discovered count |
 | `queue.discover_slots` | bool | `true` | Read slot counts from llama.cpp `/props` and llama-swap's running models |
-| `queue.slot_refresh_interval` | duration | `30s` | How often discovered slot counts are refreshed |
+| `queue.slot_refresh_interval` | duration | `30s` | How often the loaded-model list is refreshed; a model is probed for its slot count once per load, not every refresh |
 | `queue.track_external_load` | bool | `true` | Count slots a backend reports busy with other clients' traffic as taken (llama-swap `/api/events`, llama.cpp `/slots`). Needs `discover_slots` |
 | `queue.warm_first_max_wait` | duration | `10s` | Requests whose model is loaded run before ones that would load or swap a model, until a request has waited this long; then arrival order. `0` = strict arrival order |
 | `queue.swap_grace` | duration | `0s` | After a request for a loaded model finishes, requests that would swap it out wait this long for its next request. Must be shorter than `warm_first_max_wait`, which also caps it. `0` = off |

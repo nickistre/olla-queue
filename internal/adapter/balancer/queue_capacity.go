@@ -49,6 +49,21 @@ type discoveredSlots struct {
 	total  int // 0 = nothing usable learnt; the endpoint falls back
 }
 
+// loadedModel is a model a multi-model node reports as ready. identity tells
+// one loaded instance from another: llama-swap's /running cmd, or a router's
+// status.args. Empty means the backend gave nothing to compare.
+type loadedModel struct {
+	id       string
+	identity string
+}
+
+// probedModel is a cached per-model probe result, valid while the model stays
+// loaded with the same identity.
+type probedModel struct {
+	identity string
+	slots    int
+}
+
 // busyTarget is one discovered endpoint as the BusyTracker needs it.
 type busyTarget struct {
 	ep     *domain.Endpoint
@@ -60,10 +75,16 @@ type busyTarget struct {
 // them from the backends where possible:
 //
 //   - llama-swap: GET /running for the loaded models, then
-//     GET /props?model=<id>&autoload=false for each. autoload=false matters:
-//     without it llama-swap would start (swap in) a model just to answer us.
+//     GET /props?model=<id>&autoload=false for each model that is newly
+//     loaded. (llama-swap ignores autoload=false; it is harmless and kept for
+//     router mode. Only models /running reports ready are ever probed, so no
+//     probe loads one.) A model still loaded with the same /running cmd keeps
+//     its count without a new probe. Every request llama-swap dispatches to a
+//     model resets that model's ttl idle timer, so re-probing loaded models
+//     each refresh would keep them from ever unloading.
 //   - llama.cpp router mode (--models-dir/--models-preset): GET /models for
-//     models whose status is "loaded", then the same per-model /props call.
+//     models whose status is "loaded", then the same per-model /props call,
+//     cached the same way when status.args identifies the instance.
 //   - llama.cpp single model: GET /props -> total_slots, the --parallel value.
 //
 // Several models loaded on one node each have their own slots, so the node's
@@ -83,11 +104,15 @@ type SlotDiscoverer struct {
 	// lastProbe is when each endpoint was last probed, for per-endpoint
 	// slot_refresh_interval scheduling.
 	lastProbe map[string]time.Time
-	stopCh    chan struct{}
-	interval  time.Duration
-	fallback  int
-	mu        sync.RWMutex
-	stopOnce  sync.Once
+	// probed caches per-model /props results by endpoint URL, then model.
+	// An entry only lives while its model stays loaded with the same
+	// identity; see probeModels.
+	probed   map[string]map[string]probedModel
+	stopCh   chan struct{}
+	interval time.Duration
+	fallback int
+	mu       sync.RWMutex
+	stopOnce sync.Once
 }
 
 // NewSlotDiscoverer builds a discoverer that refreshes every interval. endpoints
@@ -106,6 +131,7 @@ func NewSlotDiscoverer(endpoints func(ctx context.Context) ([]*domain.Endpoint, 
 		discovered: make(map[string]discoveredSlots),
 		lastSeen:   make(map[string]*domain.Endpoint),
 		lastProbe:  make(map[string]time.Time),
+		probed:     make(map[string]map[string]probedModel),
 		stopCh:     make(chan struct{}),
 	}
 }
@@ -366,10 +392,10 @@ func sameSlots(a, b discoveredSlots) bool {
 func (d *SlotDiscoverer) probe(ctx context.Context, ep *domain.Endpoint) (discoveredSlots, error) {
 	// llama-swap: /running lists processes with a state.
 	if body, status, err := d.get(ctx, ep, "/running"); err == nil && status == http.StatusOK && gjson.GetBytes(body, "running").IsArray() {
-		var loaded []string
+		var loaded []loadedModel
 		for _, m := range gjson.GetBytes(body, "running").Array() {
 			if id := m.Get("model").String(); id != "" && m.Get("state").String() == "ready" {
-				loaded = append(loaded, id)
+				loaded = append(loaded, loadedModel{id: id, identity: m.Get("cmd").String()})
 			}
 		}
 		found := d.probeModels(ctx, ep, loaded)
@@ -400,10 +426,10 @@ func (d *SlotDiscoverer) probe(ctx context.Context, ep *domain.Endpoint) (discov
 	if status != http.StatusOK || !gjson.GetBytes(body, "data.#.status").IsArray() || len(gjson.GetBytes(body, "data.#.status").Array()) == 0 {
 		return discoveredSlots{}, fmt.Errorf("/props returned %d and /models is not a llama.cpp router listing", status)
 	}
-	var loaded []string
+	var loaded []loadedModel
 	for _, m := range gjson.GetBytes(body, "data").Array() {
 		if id := m.Get("id").String(); id != "" && m.Get("status.value").String() == "loaded" {
-			loaded = append(loaded, id)
+			loaded = append(loaded, loadedModel{id: id, identity: m.Get("status.args").Raw})
 		}
 	}
 	found := d.probeModels(ctx, ep, loaded)
@@ -435,18 +461,41 @@ func (d *SlotDiscoverer) busyTargets() []busyTarget {
 // probeModels reads total_slots for each loaded model. A multi-model node with
 // nothing loaded is a valid answer (models empty, total 0): the endpoint then
 // falls back to the default limit rather than keeping stale per-model limits.
-func (d *SlotDiscoverer) probeModels(ctx context.Context, ep *domain.Endpoint, loaded []string) discoveredSlots {
+//
+// A model that was already probed and is still loaded with the same non-empty
+// identity reuses its cached count instead of being probed again. On llama-swap
+// every dispatched request, a GET /props included, resets the model's ttl idle
+// timer, so a probe every slot_refresh_interval would keep it loaded forever.
+// The slot count can't change without the identity changing (--parallel is in
+// the cmd), and an unload drops the entry, so a reload is always re-probed.
+func (d *SlotDiscoverer) probeModels(ctx context.Context, ep *domain.Endpoint, loaded []loadedModel) discoveredSlots {
+	d.mu.RLock()
+	cached := d.probed[ep.URLString]
+	d.mu.RUnlock()
+
 	found := discoveredSlots{models: make(map[string]int, len(loaded))}
-	for _, model := range loaded {
-		body, status, err := d.get(ctx, ep, "/props?autoload=false&model="+url.QueryEscape(model))
+	next := make(map[string]probedModel, len(loaded))
+	for _, m := range loaded {
+		if c, ok := cached[m.id]; ok && m.identity != "" && c.identity == m.identity {
+			next[m.id] = c
+			found.models[m.id] = c.slots
+			found.total += c.slots
+			continue
+		}
+		body, status, err := d.get(ctx, ep, "/props?autoload=false&model="+url.QueryEscape(m.id))
 		if err != nil || status != http.StatusOK {
 			continue
 		}
 		if n, err := totalSlots(body); err == nil {
-			found.models[model] = n
+			next[m.id] = probedModel{identity: m.identity, slots: n}
+			found.models[m.id] = n
 			found.total += n
 		}
 	}
+
+	d.mu.Lock()
+	d.probed[ep.URLString] = next
+	d.mu.Unlock()
 	return found
 }
 

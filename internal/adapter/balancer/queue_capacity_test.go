@@ -106,6 +106,130 @@ func TestSlotDiscoverer_LlamaSwapOnlyProbesReadyModelsWithoutAutoload(t *testing
 	}
 }
 
+// Every request llama-swap dispatches to a model, a GET /props included, resets
+// that model's ttl idle timer. Re-probing loaded models every refresh would
+// keep them loaded forever, so a model still loaded with the same cmd keeps
+// its count without a new probe.
+func TestSlotDiscoverer_LlamaSwapDoesNotReprobeLoadedModels(t *testing.T) {
+	var running atomic.Value
+	var slots atomic.Value
+	var probes sync.Map // model -> *atomic.Int32
+	probeCount := func(model string) int32 {
+		v, _ := probes.LoadOrStore(model, new(atomic.Int32))
+		return v.(*atomic.Int32).Load()
+	}
+	running.Store(`{"running":[{"model":"qwen","state":"ready","cmd":"llama-server --parallel 2"}]}`)
+	slots.Store("2")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/running":
+			_, _ = w.Write([]byte(running.Load().(string)))
+		case "/props":
+			v, _ := probes.LoadOrStore(r.URL.Query().Get("model"), new(atomic.Int32))
+			v.(*atomic.Int32).Add(1)
+			_, _ = w.Write([]byte(`{"total_slots": ` + slots.Load().(string) + `}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	ep := probeEndpoint("swap", "openai-compatible", srv.URL)
+	d := NewSlotDiscoverer(staticEndpoints(ep), 1, 0, nil)
+	for range 3 {
+		d.Refresh(context.Background())
+	}
+	if n, _ := d.ModelSlots(ep, "qwen"); n != 2 {
+		t.Fatalf("qwen slots = %d, want 2", n)
+	}
+	if got := probeCount("qwen"); got != 1 {
+		t.Fatalf("qwen probed %d times over 3 refreshes, want 1 (re-probing resets llama-swap's ttl)", got)
+	}
+
+	// Same model, different cmd (config reload with a new --parallel): re-probe.
+	running.Store(`{"running":[{"model":"qwen","state":"ready","cmd":"llama-server --parallel 4"}]}`)
+	slots.Store("4")
+	d.Refresh(context.Background())
+	if n, _ := d.ModelSlots(ep, "qwen"); n != 4 || probeCount("qwen") != 2 {
+		t.Fatalf("after cmd change: slots = %d, probes = %d, want 4 / 2", n, probeCount("qwen"))
+	}
+
+	// Unloaded, then loaded again with the original cmd: the cache entry went
+	// with the unload, so the reload is probed.
+	running.Store(`{"running":[]}`)
+	d.Refresh(context.Background())
+	running.Store(`{"running":[{"model":"qwen","state":"ready","cmd":"llama-server --parallel 2"}]}`)
+	slots.Store("2")
+	d.Refresh(context.Background())
+	if n, _ := d.ModelSlots(ep, "qwen"); n != 2 || probeCount("qwen") != 3 {
+		t.Fatalf("after reload: slots = %d, probes = %d, want 2 / 3", n, probeCount("qwen"))
+	}
+
+	// A newly loaded second model is probed; the first is not.
+	running.Store(`{"running":[
+		{"model":"qwen","state":"ready","cmd":"llama-server --parallel 2"},
+		{"model":"embed","state":"ready","cmd":"llama-server --embedding"}]}`)
+	d.Refresh(context.Background())
+	if probeCount("qwen") != 3 || probeCount("embed") != 1 {
+		t.Fatalf("probes qwen/embed = %d/%d, want 3/1", probeCount("qwen"), probeCount("embed"))
+	}
+}
+
+// Without an identity to compare (no cmd, no router status.args) there is no
+// way to tell a reload from the same instance, so every refresh probes.
+func TestSlotDiscoverer_NoIdentityAlwaysReprobes(t *testing.T) {
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/running":
+			_, _ = w.Write([]byte(`{"running":[{"model":"qwen","state":"ready"}]}`))
+		case "/props":
+			probes.Add(1)
+			_, _ = w.Write([]byte(`{"total_slots": 2}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	ep := probeEndpoint("swap", "openai-compatible", srv.URL)
+	d := NewSlotDiscoverer(staticEndpoints(ep), 1, 0, nil)
+	d.Refresh(context.Background())
+	d.Refresh(context.Background())
+	if probes.Load() != 2 {
+		t.Fatalf("probes = %d, want 2", probes.Load())
+	}
+}
+
+// Router mode caches too when status.args identifies the loaded instance.
+func TestSlotDiscoverer_RouterModeCachesByStatusArgs(t *testing.T) {
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/props":
+			if r.URL.Query().Get("model") == "" {
+				http.Error(w, "model name is missing", http.StatusBadRequest)
+				return
+			}
+			probes.Add(1)
+			_, _ = w.Write([]byte(`{"total_slots": 4}`))
+		case "/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"gemma","status":{"value":"loaded","args":["--parallel","4"]}}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	ep := probeEndpoint("router", "llamacpp", srv.URL)
+	d := NewSlotDiscoverer(staticEndpoints(ep), 1, 0, nil)
+	d.Refresh(context.Background())
+	d.Refresh(context.Background())
+	if n, _ := d.ModelSlots(ep, "gemma"); n != 4 || probes.Load() != 1 {
+		t.Fatalf("slots = %d, probes = %d, want 4 / 1", n, probes.Load())
+	}
+}
+
 func TestSlotDiscoverer_FallbacksAndOverrides(t *testing.T) {
 	var fail atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
