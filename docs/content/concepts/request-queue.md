@@ -60,6 +60,14 @@ A model is probed once per load, not on every refresh. While it stays loaded wit
 
 On a multi-model node, a model that isn't loaded gets a limit of **1** until the backend reports it ready (the cold-model gate). The first request starts the load. Further requests wait in Olla's queue rather than piling up behind the load inside the backend. The model's real slot count is learnt as soon as it is ready.
 
+A swap domain (the model's slot group, else the whole endpoint) holds one model at a time, and its limit is the loaded model's slot count. When that model runs with `--parallel` above 1, there is free room that a request for another model could take, forcing a swap while the loaded model's requests are still running. So within a swap domain, a request never runs alongside in-flight requests for a different model, Olla's or another client's, whenever either of the two models is cold:
+
+- A request for a model that isn't loaded waits until the domain is idle, even if slots are free.
+- While that request is in flight (its model is loading), requests for the outgoing model wait too. Discovery still reports the outgoing model as loaded until the swap shows up, and letting them through would swap straight back.
+- Two models that are both loaded, on a backend that keeps several in memory, run side by side as usual.
+
+A request waiting for a swap has to wait for the domain to drain. Once it has waited `warm_first_max_wait` (see below), or at once when that is `0`, new requests for the loaded model in that domain queue behind it instead of taking free slots. Without that, steady traffic for the loaded model could keep the domain busy forever.
+
 On llama-swap, a model starting, finishing its load or stopping triggers re-discovery of that node about half a second after its events settle. Olla's view of what's loaded therefore follows a swap almost immediately, rather than waiting up to `slot_refresh_interval`.
 
 ### Slot groups
@@ -120,7 +128,7 @@ The Queue tab tags a holding request **holding**. Its Dispatched tile counts how
 `proxy.queue.warm_first_max_wait` (default `10s`) reorders the queue so a swap isn't forced while work for the loaded model is waiting. Requests whose model is already loaded on a backend they can use run before requests that would load or swap a model.
 
 - Among requests of the same kind, order is still arrival order.
-- A request that has waited longer than `warm_first_max_wait` is served strictly in arrival order, so a request needing a swap can't starve.
+- A request that has waited longer than `warm_first_max_wait` is served strictly in arrival order, so a request needing a swap can't starve. On a multi-slot backend, it also stops new requests for the loaded model from taking free slots in its swap domain, so the domain can drain (see [Model limits](#model-limits)).
 - Set it to `0` for strict arrival order.
 
 The Queue tab tags such requests **cold**: no backend they can use has their model loaded.

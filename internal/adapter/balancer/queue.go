@@ -1096,13 +1096,16 @@ func decrementOrDelete(m map[string]int, k string) {
 
 // freeLocked filters to endpoints that have room for this request: under the
 // endpoint-wide limit, under its slot group's limit and, where the backend
-// reported one, under the limit of the model the request will run.
+// reported one, under the limit of the model the request will run. On top of
+// the limits, a request must not force a swap under running work (swapConflict)
+// and must not hold up an aged request that is waiting to swap (draining).
 //
 // A grouped model skips the endpoint-wide limit unless max_concurrent sets it.
 // The discovered total only sums loaded models (and falls back to
 // default_slots), so it would let a busy group block an idle one alongside it.
 func (q *QueueWrapper) freeLocked(ctx context.Context, endpoints []*domain.Endpoint) []*domain.Endpoint {
 	var free []*domain.Endpoint
+	now := time.Now()
 	for _, ep := range endpoints {
 		if !q.upLocked(ep) {
 			continue
@@ -1129,10 +1132,79 @@ func (q *QueueWrapper) freeLocked(ctx context.Context, endpoints []*domain.Endpo
 					continue
 				}
 			}
+			if q.swapConflictLocked(ep, model) || q.drainingLocked(ep, model, now) {
+				continue
+			}
 		}
 		free = append(free, ep)
 	}
 	return free
+}
+
+// swapConflictLocked reports whether running model on ep now would swap a model
+// out from under running work, or race one that is loading. A swap domain
+// (slot group, else endpoint; see graceKey) holds one model at a time, so its
+// limit is the loaded model's slots. With --parallel above 1 that leaves room
+// a request for another model would otherwise take, forcing a swap while the
+// loaded model's requests run.
+//
+// It is a conflict when another model has requests in flight in the same
+// domain, Olla's or another client's, and either model is cold. Cold here
+// means one that would have to load. A request for a cold model therefore
+// waits for the domain to drain. While a cold model's request is in flight
+// (it is loading), requests for the outgoing model wait too, because discovery
+// still reports that one loaded until the swap shows up. Two models that are
+// both loaded run side by side, as on a node that keeps several in memory.
+func (q *QueueWrapper) swapConflictLocked(ep *domain.Endpoint, model string) bool {
+	mine := q.resolver.ModelState(ep, model)
+	if mine == ModelStateUnknown {
+		return false
+	}
+	dom := graceKey(ep, model)
+	prefix := modelKey(ep.URLString, "")
+	conflicts := func(counts map[string]int) bool {
+		for k, n := range counts {
+			other, ok := strings.CutPrefix(k, prefix)
+			if !ok || n <= 0 || other == model || graceKey(ep, other) != dom {
+				continue
+			}
+			if mine == ModelStateCold || q.resolver.ModelState(ep, other) == ModelStateCold {
+				return true
+			}
+		}
+		return false
+	}
+	return conflicts(q.modelInUse) || conflicts(q.modelExternal)
+}
+
+// drainingLocked reports whether a request for model, loaded on ep, should
+// queue so that its swap domain can drain for an older request. That request
+// is one for a cold model in the same domain that has waited at least
+// warm_first_max_wait (any time at all when warm-first is off). Without this,
+// steady traffic for the loaded model would keep the domain busy, and the cold
+// request, which needs it idle (swapConflictLocked), would never run. Past the
+// cap it is arrival order again, as in dispatchLocked.
+func (q *QueueWrapper) drainingLocked(ep *domain.Endpoint, model string, now time.Time) bool {
+	if q.resolver.ModelState(ep, model) != ModelStateLoaded {
+		return false
+	}
+	dom := graceKey(ep, model)
+	for e := q.waiters.Front(); e != nil; e = e.Next() {
+		w := waiterAt(e)
+		if now.Sub(w.enqueuedAt) < q.cfg.WarmFirstMaxWait {
+			break // arrival order: every later waiter is younger still
+		}
+		for _, c := range w.candidates {
+			if c.URLString != ep.URLString {
+				continue
+			}
+			wm := q.modelOf(w.ctx, c)
+			if wm != "" && wm != model && graceKey(c, wm) == dom && q.resolver.ModelState(c, wm) == ModelStateCold {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (q *QueueWrapper) anyUpLocked(endpoints []*domain.Endpoint) bool {

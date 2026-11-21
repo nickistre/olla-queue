@@ -389,3 +389,132 @@ func TestQueue_SwapGraceStopsAtWarmFirstCap(t *testing.T) {
 		t.Fatalf("aged cold request should not be held: %+v", r)
 	}
 }
+
+// multiSlotGPUNode is taki since qwen3.6 runs --parallel 4: the GPU group's
+// limit is the loaded model's 4 slots, so it has room a request for another
+// model could take.
+func multiSlotGPUNode(t *testing.T, warmCap time.Duration, loaded ...string) (*QueueWrapper, *domain.Endpoint) {
+	t.Helper()
+	node := makeEndpoint("taki", "http://taki:8080")
+	node.SlotGroups = []domain.SlotGroup{{Name: "gpu", Models: []string{"qwen*"}}}
+	res := modelSlots{
+		endpoint: 8,
+		models:   map[string]int{"qwen3.6": 4, "qwen3.8": 2},
+		groups:   map[string]int{"gpu": 4},
+		loaded:   map[string][]string{node.URLString: loaded},
+	}
+	cfg := defaultQueueConfig()
+	cfg.WarmFirstMaxWait = warmCap
+	q := NewQueueWrapper(NewRoundRobinSelector(NewTestStatsCollector()), cfg, res)
+	t.Cleanup(q.Stop)
+	return q, node
+}
+
+func assertWaiting(t *testing.T, ch <-chan queueResult, what string) {
+	t.Helper()
+	select {
+	case r := <-ch:
+		t.Fatalf("%s should still be waiting: %+v", what, r)
+	case <-time.After(30 * time.Millisecond):
+	}
+}
+
+func TestQueue_ColdModelWaitsForSwapDomainToDrain(t *testing.T) {
+	q, node := multiSlotGPUNode(t, time.Minute, "qwen3.6")
+	eps := []*domain.Endpoint{node}
+
+	running, err := q.Select(modelCtx("qwen3.6"), eps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The group has 3 free slots, but taking one would swap qwen3.6 out
+	// from under its running request.
+	cold := selectAsync(modelCtx("qwen3.8"), q, eps)
+	waitForDepth(t, q, 1)
+	assertWaiting(t, cold, "cold request")
+
+	q.DecrementConnections(running)
+	if r := mustReceive(t, cold); r.err != nil {
+		t.Fatalf("cold request once the domain drained: %+v", r)
+	}
+}
+
+func TestQueue_LoadedModelWaitsWhileAColdModelLoads(t *testing.T) {
+	q, node := multiSlotGPUNode(t, time.Minute, "qwen3.6")
+	eps := []*domain.Endpoint{node}
+
+	loading, err := q.Select(modelCtx("qwen3.8"), eps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// qwen3.8 is loading (discovery still says qwen3.6 is loaded). A request
+	// for qwen3.6 now would swap straight back.
+	back := selectAsync(modelCtx("qwen3.6"), q, eps)
+	waitForDepth(t, q, 1)
+	assertWaiting(t, back, "request for the outgoing model")
+
+	q.DecrementConnections(loading)
+	mustReceive(t, back)
+}
+
+func TestQueue_LoadedModelsShareADomainWithoutConflict(t *testing.T) {
+	// A node that keeps both models in memory: no swap, so no conflict.
+	q, node := multiSlotGPUNode(t, time.Minute, "qwen3.6", "qwen3.8")
+	eps := []*domain.Endpoint{node}
+
+	if _, err := q.Select(modelCtx("qwen3.6"), eps); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Select(modelCtx("qwen3.8"), eps); err != nil {
+		t.Fatalf("both loaded, both should run: %v", err)
+	}
+}
+
+func TestQueue_ColdModelWaitsForExternalTrafficOnLoadedModel(t *testing.T) {
+	q, node := multiSlotGPUNode(t, time.Minute, "qwen3.6")
+	eps := []*domain.Endpoint{node}
+	// Another client is running qwen3.6 directly against llama-swap.
+	q.ObserveBusy(node, BackendBusy{Valid: true, Total: 1, Models: map[string]int{"qwen3.6": 1}})
+
+	cold := selectAsync(modelCtx("qwen3.8"), q, eps)
+	waitForDepth(t, q, 1)
+	assertWaiting(t, cold, "cold request")
+
+	q.ObserveBusy(node, BackendBusy{Valid: true})
+	mustReceive(t, cold)
+}
+
+func TestQueue_AgedColdRequestDrainsTheDomain(t *testing.T) {
+	q, node := multiSlotGPUNode(t, 40*time.Millisecond, "qwen3.6")
+	eps := []*domain.Endpoint{node}
+
+	running, err := q.Select(modelCtx("qwen3.6"), eps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cold := selectAsync(modelCtx("qwen3.8"), q, eps)
+	waitForDepth(t, q, 1)
+
+	// Before the cap, the loaded model's requests still take free slots.
+	early, err := q.Select(modelCtx("qwen3.6"), eps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.DecrementConnections(early)
+
+	time.Sleep(60 * time.Millisecond) // the cold request is now past the cap
+	// Free slots remain, but a new qwen3.6 request queues so the domain can
+	// drain; otherwise steady qwen3.6 traffic would starve the cold request.
+	late := selectAsync(modelCtx("qwen3.6"), q, eps)
+	waitForDepth(t, q, 2)
+	assertWaiting(t, late, "request for the loaded model")
+
+	q.DecrementConnections(running)
+	c := mustReceive(t, cold)
+	if c.err != nil {
+		t.Fatalf("aged cold request: %+v", c)
+	}
+	assertWaiting(t, late, "request for the outgoing model while the cold one loads")
+	q.DecrementConnections(c.endpoint)
+	mustReceive(t, late)
+}
