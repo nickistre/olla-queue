@@ -773,9 +773,10 @@ func (q *QueueWrapper) dispatchPassLocked(now time.Time, eligible func(*queueWai
 		next := e.Next()
 		w := waiterAt(e)
 		if free := q.admissibleLocked(w.ctx, w.candidates, w.stickyKey, w.holdUntil, w.since, now); len(free) > 0 && eligible(w, free) {
+			pinned, hadPin := q.holdPinLocked(w)
 			ep, err := q.reserveLocked(w.ctx, free)
-			if err == nil {
-				q.countHoldLocked(w, ep)
+			if err == nil && hadPin {
+				q.countHoldLocked(pinned, ep)
 			}
 			q.completeLocked(w, queueResult{endpoint: ep, err: err})
 		}
@@ -783,15 +784,18 @@ func (q *QueueWrapper) dispatchPassLocked(now time.Time, eligible func(*queueWai
 	}
 }
 
-// countHoldLocked records whether a queued request with a live pin got it.
-func (q *QueueWrapper) countHoldLocked(w *queueWaiter, got *domain.Endpoint) {
+// holdPinLocked returns the live pin of a queued request that holds for one.
+// It must be read before reserving: the sticky selector re-pins the key when
+// the request moves, so a later read would always see a match.
+func (q *QueueWrapper) holdPinLocked(w *queueWaiter) (string, bool) {
 	if w.holdUntil.IsZero() || q.pinPeek == nil {
-		return
+		return "", false
 	}
-	pinned, ok := q.pinPeek(w.stickyKey)
-	if !ok {
-		return
-	}
+	return q.pinPeek(w.stickyKey)
+}
+
+// countHoldLocked records whether a queued request with a live pin got it.
+func (q *QueueWrapper) countHoldLocked(pinned string, got *domain.Endpoint) {
 	if pinned == got.URLString {
 		q.stats.holdKept.Add(1)
 	} else {

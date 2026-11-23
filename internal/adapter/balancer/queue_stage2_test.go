@@ -253,6 +253,46 @@ func TestQueue_StickyHoldWithRealStickyWrapper(t *testing.T) {
 	}
 }
 
+func TestQueue_StickyHoldLapseCountsMovedWithRealStickyWrapper(t *testing.T) {
+	// The sticky wrapper re-pins the key as the lapsed request moves, so the
+	// counter must compare against the pin it held before the move.
+	sw := NewStickySessionWrapper(NewRoundRobinSelector(NewTestStatsCollector()), defaultStickyConfig())
+	sw.Start()
+	t.Cleanup(sw.Stop)
+	q := NewQueueWrapper(sw, defaultQueueConfig(), nil)
+	t.Cleanup(q.Stop)
+	q.SetStickyHold(sw.Peek, 60*time.Millisecond)
+	a := makeEndpoint("a", "http://a:1")
+	b := makeEndpoint("b", "http://b:1")
+	eps := []*domain.Endpoint{a, b}
+
+	ctx1, _ := injectKey(context.Background(), "conv-7", "session_header")
+	first, err := q.Select(ctx1, eps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := b.URLString
+	if first.URLString == b.URLString {
+		other = a.URLString
+	}
+
+	// Turn one stays busy, so turn two waits out its hold and moves.
+	ctx2, outcome := injectKey(context.Background(), "conv-7", "session_header")
+	r := mustReceive(t, selectAsync(ctx2, q, eps))
+	if r.err != nil || r.endpoint.URLString != other {
+		t.Fatalf("after the hold turn two should move to %s: %+v", other, r)
+	}
+	if outcome.Result != "repin" {
+		t.Fatalf("sticky outcome = %q, want repin", outcome.Result)
+	}
+	if pin, _ := sw.Peek("conv-7"); pin != other {
+		t.Fatalf("pin = %q, want re-pinned to %s", pin, other)
+	}
+	if s := q.Stats(); s.HoldMoved != 1 || s.HoldKept != 0 {
+		t.Fatalf("hold counters: kept=%d moved=%d, want 0/1", s.HoldKept, s.HoldMoved)
+	}
+}
+
 // twoGroupNode is taki with an embeddings group beside the GPU group, and a
 // discovered endpoint total of 1: only qwen3.6 is loaded.
 func twoGroupNode() (modelSlots, *domain.Endpoint) {
