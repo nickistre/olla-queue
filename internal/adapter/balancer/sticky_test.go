@@ -582,3 +582,69 @@ func TestStickyPinnedURLs_DoesNotTouchStats(t *testing.T) {
 		t.Fatalf("lookup changed sticky stats: before %+v after %+v", before, after)
 	}
 }
+
+func TestStickySessionWrapper_NoStickyKeepsExistingPin(t *testing.T) {
+	t.Parallel()
+
+	w := makeWrapper(t, defaultStickyConfig())
+	local := makeEndpoint("local", "http://local:8080")
+	overflow := makeEndpoint("overflow", "http://overflow:8080")
+	overflow.NoSticky = true
+
+	ctx, _ := injectKey(context.Background(), "conv-1", "session_header")
+	_, err := w.Select(ctx, []*domain.Endpoint{local})
+	require.NoError(t, err)
+
+	// Only the overflow endpoint is on offer, as when the local one is busy.
+	ctx, outcome := injectKey(context.Background(), "conv-1", "session_header")
+	chosen, err := w.Select(ctx, []*domain.Endpoint{overflow})
+	require.NoError(t, err)
+	assert.Equal(t, overflow.URLString, chosen.URLString)
+	assert.Equal(t, "bypass", outcome.Result)
+	assert.Equal(t, "session_header", outcome.Source)
+
+	pin, ok := w.Peek("conv-1")
+	require.True(t, ok)
+	assert.Equal(t, local.URLString, pin, "the pin must stay on the local endpoint")
+
+	ctx, outcome = injectKey(context.Background(), "conv-1", "session_header")
+	chosen, err = w.Select(ctx, []*domain.Endpoint{local, overflow})
+	require.NoError(t, err)
+	assert.Equal(t, local.URLString, chosen.URLString)
+	assert.Equal(t, "hit", outcome.Result)
+}
+
+func TestStickySessionWrapper_NoStickyCreatesNoPin(t *testing.T) {
+	t.Parallel()
+
+	w := makeWrapper(t, defaultStickyConfig())
+	overflow := makeEndpoint("overflow", "http://overflow:8080")
+	overflow.NoSticky = true
+
+	ctx, outcome := injectKey(context.Background(), "conv-2", "session_header")
+	_, err := w.Select(ctx, []*domain.Endpoint{overflow})
+	require.NoError(t, err)
+	assert.Equal(t, "bypass", outcome.Result)
+
+	_, ok := w.Peek("conv-2")
+	assert.False(t, ok, "a NoSticky endpoint must not be pinned")
+}
+
+func TestStickySessionWrapper_StalePinToNoStickyIsNotAHit(t *testing.T) {
+	t.Parallel()
+
+	w := makeWrapper(t, defaultStickyConfig())
+	ep := makeEndpoint("ep", "http://ep:8080")
+
+	ctx, _ := injectKey(context.Background(), "conv-3", "session_header")
+	_, err := w.Select(ctx, []*domain.Endpoint{ep})
+	require.NoError(t, err)
+
+	// A config reload marks the pinned endpoint NoSticky.
+	ep.NoSticky = true
+	ctx, outcome := injectKey(context.Background(), "conv-3", "session_header")
+	chosen, err := w.Select(ctx, []*domain.Endpoint{ep})
+	require.NoError(t, err)
+	assert.Equal(t, ep.URLString, chosen.URLString)
+	assert.Equal(t, "bypass", outcome.Result)
+}

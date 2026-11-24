@@ -206,6 +206,7 @@ func (r *StaticEndpointRepository) LoadFromConfig(ctx context.Context, configs [
 			QueueAfter:            cfg.QueueAfter,
 			SlotRefreshInterval:   cfg.SlotRefreshInterval,
 			NoSlotDiscovery:       cfg.DiscoverSlots != nil && !*cfg.DiscoverSlots,
+			NoSticky:              cfg.StickySessions != nil && !*cfg.StickySessions,
 			SlotGroups:            slotGroups(cfg.SlotGroups),
 		}
 

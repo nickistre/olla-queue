@@ -140,7 +140,8 @@ type QueueRefresher func(ctx context.Context) []*Endpoint
 // Defined here (not in adapter/balancer) so that adapter/proxy/core can read it
 // without creating an import cycle.
 type StickyOutcome struct {
-	// Result is "hit", "miss", "repin", or "disabled".
+	// Result is "hit", "miss", "repin", "bypass" (served by a NoSticky
+	// endpoint, pin left as it was), or "disabled".
 	Result string
 	// Source is which key source produced the affinity key.
 	Source string

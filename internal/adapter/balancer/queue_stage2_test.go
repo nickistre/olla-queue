@@ -293,6 +293,41 @@ func TestQueue_StickyHoldLapseCountsMovedWithRealStickyWrapper(t *testing.T) {
 	}
 }
 
+func TestQueue_StickyHoldLapseOntoNoStickyKeepsPin(t *testing.T) {
+	// A request that waits out its hold and lands on a NoSticky overflow
+	// endpoint must leave the pin on the busy local endpoint.
+	sw := NewStickySessionWrapper(NewRoundRobinSelector(NewTestStatsCollector()), defaultStickyConfig())
+	sw.Start()
+	t.Cleanup(sw.Stop)
+	q := NewQueueWrapper(sw, defaultQueueConfig(), nil)
+	t.Cleanup(q.Stop)
+	q.SetStickyHold(sw.Peek, 60*time.Millisecond)
+	local := makeEndpoint("local", "http://local:1")
+	overflow := makeEndpoint("overflow", "http://overflow:1")
+	overflow.NoSticky = true
+
+	ctx1, _ := injectKey(context.Background(), "conv-8", "session_header")
+	if _, err := q.Select(ctx1, []*domain.Endpoint{local}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Turn one stays busy, so turn two waits out its hold and overflows.
+	ctx2, outcome := injectKey(context.Background(), "conv-8", "session_header")
+	r := mustReceive(t, selectAsync(ctx2, q, []*domain.Endpoint{local, overflow}))
+	if r.err != nil || r.endpoint.URLString != overflow.URLString {
+		t.Fatalf("after the hold turn two should move to the overflow endpoint: %+v", r)
+	}
+	if outcome.Result != "bypass" {
+		t.Fatalf("sticky outcome = %q, want bypass", outcome.Result)
+	}
+	if pin, _ := sw.Peek("conv-8"); pin != local.URLString {
+		t.Fatalf("pin = %q, want it kept on %s", pin, local.URLString)
+	}
+	if s := q.Stats(); s.HoldMoved != 1 || s.HoldKept != 0 {
+		t.Fatalf("hold counters: kept=%d moved=%d, want 0/1", s.HoldKept, s.HoldMoved)
+	}
+}
+
 // twoGroupNode is taki with an embeddings group beside the GPU group, and a
 // discovered endpoint total of 1: only qwen3.6 is loaded.
 func twoGroupNode() (modelSlots, *domain.Endpoint) {

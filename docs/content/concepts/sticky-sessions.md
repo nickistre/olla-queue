@@ -56,6 +56,23 @@ sequenceDiagram
 
 On its own, a sticky session moves to another backend when its pinned one is unavailable. With the [request queue](request-queue.md) enabled, a busy backend is also full: by default the request moves straight to a free backend and the pin moves with it. Set `hold_seconds` to have it wait for its own backend first, keeping the KV cache. See [Hold for a busy sticky backend](request-queue.md#hold-for-a-busy-sticky-backend).
 
+## Endpoints that never take a pin
+
+Set `sticky_sessions: false` on an endpoint to keep sessions from pinning to it. A request served there leaves the conversation's pin where it was, and the response carries `X-Olla-Sticky-Session: bypass`. A conversation with no pin yet stays unpinned. This is meant for [overflow endpoints](request-queue.md#overflow-endpoints): when a queued request spills over to one, the next turn still returns to (or holds for) the backend with its KV cache.
+
+```yaml
+discovery:
+  static:
+    endpoints:
+      - name: spill
+        url: http://spare:8080
+        type: openai-compatible
+        queue_after: 2m
+        sticky_sessions: false
+```
+
+The option only matters when `proxy.sticky_sessions.enabled` is true.
+
 ## Key sources
 
 The `key_sources` list is evaluated in order; the first source that produces a non-empty value wins. All keys are scoped to the model name so the same client talking to different models maintains independent session state.
@@ -102,7 +119,7 @@ Olla writes three response headers so clients and operators can observe affinity
 
 | Header | Values | Meaning |
 |---|---|---|
-| `X-Olla-Sticky-Session` | `hit` / `miss` / `repin` / `disabled` | Outcome of the affinity lookup for this request |
+| `X-Olla-Sticky-Session` | `hit` / `miss` / `repin` / `bypass` / `disabled` | Outcome of the affinity lookup for this request. `bypass` = served by an endpoint with `sticky_sessions: false`, pin left unchanged |
 | `X-Olla-Sticky-Key-Source` | `session_header` / `prefix_hash` / `auth_header` / `ip` / `none` | Which key source was used (absent when outcome is `disabled`) |
 | `X-Olla-Session-ID` | _(echoed from request)_ | Present in the response only when the client sent `X-Olla-Session-ID`; lets stateless clients confirm the header was received |
 

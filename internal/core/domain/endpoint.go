@@ -64,6 +64,9 @@ type Endpoint struct {
 	// QueueAfter is how long a request must have waited in the queue before it
 	// may use this endpoint; 0 = no delay.
 	QueueAfter time.Duration
+	// NoSticky stops sticky sessions pinning to this endpoint; requests it
+	// serves leave any existing pin in place.
+	NoSticky bool
 	// SlotRefreshInterval overrides the queue-wide slot discovery interval;
 	// 0 = the queue-wide value.
 	SlotRefreshInterval time.Duration

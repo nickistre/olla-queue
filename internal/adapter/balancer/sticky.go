@@ -132,7 +132,9 @@ func (s *StickySessionWrapper) Select(ctx context.Context, endpoints []*domain.E
 	if item != nil {
 		pinnedURL := item.Value()
 		for _, ep := range endpoints {
-			if ep.Status.IsRoutable() && ep.URLString == pinnedURL {
+			// A pin to a NoSticky endpoint can only predate a config change; drop
+			// through as if unpinned.
+			if ep.Status.IsRoutable() && ep.URLString == pinnedURL && !ep.NoSticky {
 				// Sticky hit — backend is still alive and serving this model.
 				if outcome != nil {
 					outcome.Result = "hit"
@@ -147,6 +149,16 @@ func (s *StickySessionWrapper) Select(ctx context.Context, endpoints []*domain.E
 	chosen, err := s.inner.Select(ctx, endpoints)
 	if err != nil {
 		return nil, err
+	}
+
+	if chosen.NoSticky {
+		// Leave any existing pin alone so the next turn returns to the backend
+		// holding the KV cache rather than following an overflow detour.
+		if outcome != nil {
+			outcome.Result = "bypass"
+			outcome.Source = source
+		}
+		return chosen, nil
 	}
 
 	// Record the affinity mapping for future turns.

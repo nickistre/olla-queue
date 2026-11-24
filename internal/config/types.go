@@ -378,7 +378,12 @@ type EndpointConfig struct {
 	// /running, /props or /models probes, so no external load tracking
 	// either). Unset follows proxy.queue.discover_slots.
 	DiscoverSlots *bool `yaml:"discover_slots"`
-	PreservePath  bool  `yaml:"preserve_path"`
+	// StickySessions false keeps sticky sessions from pinning to this
+	// endpoint: a request served here leaves the conversation's pin where it
+	// was, so an overflow node never takes over a local node's KV cache.
+	// Unset or true = normal sticky behaviour.
+	StickySessions *bool `yaml:"sticky_sessions"`
+	PreservePath   bool  `yaml:"preserve_path"`
 }
 
 // SlotGroupConfig is one capacity pool on an endpoint. A model joins the first

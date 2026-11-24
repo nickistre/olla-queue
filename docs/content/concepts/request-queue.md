@@ -167,6 +167,7 @@ discovery:
         max_concurrent: 2
         queue_after: 5m
         discover_slots: false   # nothing to discover on a hosted service
+        sticky_sessions: false  # keep conversations pinned to local backends
 
 proxy:
   queue:
@@ -179,6 +180,7 @@ proxy:
 - When no endpoint without a delay that could serve the request is up, because all are down or the model exists only on the overflow endpoint, the delay is waived. There is nothing to wait for.
 - A retry after a failed attempt keeps the time it already spent queued.
 - A sticky pin to an overflow endpoint doesn't hold a new request there, so a conversation's next turn returns to a local backend.
+- With sticky sessions on, set `sticky_sessions: false` on the overflow endpoint. Otherwise a request that spills over moves the conversation's pin there, and the next turn loses the local backend's KV cache. With the option set, the pin stays on the local backend, and a later turn holds for it under `hold_seconds`.
 - If the remote service names the model differently, map it with a [model alias](model-aliases.md).
 - `queue_after` needs `proxy.queue.enabled`, and must be shorter than `proxy.queue.timeout`. Both are checked at startup.
 - A hosted service can't report slots. Set `discover_slots: false` on it so the queue doesn't probe it every `slot_refresh_interval`.

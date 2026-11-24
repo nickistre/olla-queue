@@ -284,6 +284,48 @@ func TestLoadFromConfig_ZeroPriorityRoundTrip(t *testing.T) {
 	}
 }
 
+// sticky_sessions: false must reach the domain endpoint as NoSticky; unset
+// and true leave the endpoint pinnable.
+func TestLoadFromConfig_StickySessionsFlag(t *testing.T) {
+	t.Parallel()
+
+	off, on := false, true
+	cases := []struct {
+		flag *bool
+		name string
+		want bool
+	}{
+		{name: "unset", flag: nil, want: false},
+		{name: "true", flag: &on, want: false},
+		{name: "false", flag: &off, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			repo := NewStaticEndpointRepository()
+			cfg := config.EndpointConfig{
+				Name:           "ep",
+				URL:            "http://localhost:11434",
+				Type:           "ollama",
+				Priority:       ptrInt(100),
+				CheckInterval:  5 * time.Second,
+				CheckTimeout:   2 * time.Second,
+				StickySessions: tc.flag,
+			}
+			if err := repo.LoadFromConfig(context.Background(), []config.EndpointConfig{cfg}); err != nil {
+				t.Fatalf("LoadFromConfig failed: %v", err)
+			}
+			endpoints, err := repo.GetAll(context.Background())
+			if err != nil || len(endpoints) != 1 {
+				t.Fatalf("GetAll: %v, %d endpoints", err, len(endpoints))
+			}
+			if endpoints[0].NoSticky != tc.want {
+				t.Errorf("NoSticky = %v, want %v", endpoints[0].NoSticky, tc.want)
+			}
+		})
+	}
+}
+
 func TestEndpointConfigValidation_WithType(t *testing.T) {
 	testCases := []struct {
 		name      string
