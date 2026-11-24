@@ -179,6 +179,9 @@ type QueueWrapper struct {
 	// pinLookup maps sticky keys to pinned endpoint URLs for the stats
 	// listing. Optional: nil when sticky sessions are off.
 	pinLookup func(keys []string) map[string]string
+	// listEndpoints returns every configured endpoint, so the stats listing
+	// shows those the queue has not routed to yet. Optional.
+	listEndpoints func(ctx context.Context) ([]*domain.Endpoint, error)
 	// pinPeek resolves one sticky key to its pinned URL without touching the
 	// session; with holdFor > 0 it drives sticky hold. Optional.
 	pinPeek func(key string) (string, bool)
@@ -492,6 +495,14 @@ func (q *QueueWrapper) SetStickyHold(peek func(key string) (string, bool), hold 
 func (q *QueueWrapper) SetPinLookup(fn func(keys []string) map[string]string) {
 	q.mu.Lock()
 	q.pinLookup = fn
+	q.mu.Unlock()
+}
+
+// SetEndpointLister lets the stats listing include configured endpoints the
+// queue has not seen yet, such as an overflow endpoint no request has needed.
+func (q *QueueWrapper) SetEndpointLister(fn func(ctx context.Context) ([]*domain.Endpoint, error)) {
+	q.mu.Lock()
+	q.listEndpoints = fn
 	q.mu.Unlock()
 }
 
@@ -1483,11 +1494,31 @@ type QueueStats struct {
 func (q *QueueWrapper) Stats() QueueStats {
 	now := time.Now()
 
+	// The lister is called outside q.mu so dispatch never waits on it.
+	q.mu.Lock()
+	lister := q.listEndpoints
+	q.mu.Unlock()
+	var configured []*domain.Endpoint
+	if lister != nil {
+		if all, err := lister(context.Background()); err == nil {
+			configured = all
+		}
+	}
+
 	q.mu.Lock()
 	depth := q.waiters.Len()
-	eps := make([]QueueEndpointStats, 0, len(q.known))
-	names := make(map[string]string, len(q.known))
+	// Endpoints the queue has seen keep its copy; configured ones it has not
+	// are listed too, so an idle overflow endpoint still shows its slots.
+	listed := make(map[string]*domain.Endpoint, len(q.known)+len(configured))
+	for _, ep := range configured {
+		listed[ep.URLString] = ep
+	}
 	for url, ep := range q.known {
+		listed[url] = ep
+	}
+	eps := make([]QueueEndpointStats, 0, len(listed))
+	names := make(map[string]string, len(listed))
+	for url, ep := range listed {
 		slots, source := q.resolver.Slots(ep)
 		names[url] = ep.Name
 		_, isDown := q.down[url]

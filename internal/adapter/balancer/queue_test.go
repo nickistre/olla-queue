@@ -595,3 +595,32 @@ func TestStoreMinTreatsZeroAsUnset(t *testing.T) {
 		t.Fatalf("min = %d, want 200", v.Load())
 	}
 }
+
+// An overflow endpoint no request has needed yet must still appear in the
+// stats, or the dashboard hides it until the first spill-over.
+func TestQueue_StatsListsConfiguredEndpointsNotYetSeen(t *testing.T) {
+	local := makeEndpoint("local", "http://local:1")
+	overflow := makeEndpoint("overflow", "http://overflow:1")
+	q := NewQueueWrapper(NewRoundRobinSelector(NewTestStatsCollector()), defaultQueueConfig(), nil)
+	t.Cleanup(q.Stop)
+	q.SetEndpointLister(func(context.Context) ([]*domain.Endpoint, error) {
+		return []*domain.Endpoint{local, overflow}, nil
+	})
+	if _, err := q.Select(context.Background(), []*domain.Endpoint{local}); err != nil {
+		t.Fatal(err)
+	}
+
+	byName := map[string]QueueEndpointStats{}
+	for _, ep := range q.Stats().Endpoints {
+		byName[ep.Name] = ep
+	}
+	if len(byName) != 2 {
+		t.Fatalf("endpoints = %v, want local and overflow", byName)
+	}
+	if byName["local"].InUse != 1 || byName["overflow"].InUse != 0 {
+		t.Fatalf("in use local=%d overflow=%d", byName["local"].InUse, byName["overflow"].InUse)
+	}
+	if byName["overflow"].Slots < 1 {
+		t.Fatalf("overflow slots = %d", byName["overflow"].Slots)
+	}
+}

@@ -376,6 +376,9 @@ func (s *ProxyServiceWrapper) applyQueue() {
 			qw.SetStickyHold(s.stickyWrapper.Peek, time.Duration(hold)*time.Second)
 		}
 	}
+	if s.endpointRepo != nil {
+		qw.SetEndpointLister(s.endpointRepo.GetAll)
+	}
 	s.queueWrapper = qw
 	s.loadBalancer = qw
 

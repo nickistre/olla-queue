@@ -257,7 +257,7 @@
     <div class="section">
       <div class="section-head">
         <h3>Endpoint slots</h3>
-        <span class="section-note">endpoints appear once the queue has routed to them · <span class="external">+N</span> = busy with other clients' traffic</span>
+        <span class="section-note"><span class="external">+N</span> = busy with other clients' traffic</span>
       </div>
       {#if slotRows.length > 0}
         <SortableTable columns={slotColumns} rows={slotRows} initialSort={slotSort} rowId={(row) => row.id}>
@@ -297,7 +297,7 @@
           {/snippet}
         </SortableTable>
       {:else}
-        <p class="queue-empty" role="status">No requests have been routed through the queue yet.</p>
+        <p class="queue-empty" role="status">No endpoints are configured.</p>
       {/if}
     </div>
   {/if}
