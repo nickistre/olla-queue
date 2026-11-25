@@ -66,6 +66,14 @@ Exclude has no request switch on most local backends. Olla logs it at debug leve
 
 The body is left byte-for-byte identical when it has no reasoning field, when the endpoint is `passthrough`, or when the path is not `/v1/chat/completions`, `/v1/completions`, `/api/chat` or `/api/generate`. The Responses API is not translated.
 
+Each attempt that actually changes the body logs an info line, so a failover shows one line per backend:
+
+```text
+INFO Reasoning parameters translated request_id=… endpoint=openrouter from=openai to=openrouter from_fields=reasoning_effort to_fields=reasoning.effort,reasoning.enabled
+```
+
+`from` names the request shapes the client used (`openrouter`, `openai`, `chat_template_kwargs`, `llamacpp`, `vllm`, `sglang`, `ollama`), `to` is the endpoint's dialect, and the `_fields` keys list the exact fields on each side. A body already in the endpoint's dialect renders to the same bytes and is not logged.
+
 ## Choosing an endpoint's dialect
 
 Resolved once when endpoints load; the first match wins:

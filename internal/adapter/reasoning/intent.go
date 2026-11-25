@@ -63,6 +63,53 @@ type Intent struct {
 	// fields records every input field Parse understood, so Render strips
 	// exactly those and leaves anything it didn't recognise in place.
 	fields []string
+	// inputs is the same set at leaf level (reasoning.effort rather than
+	// reasoning), for logging what the client actually sent.
+	inputs []string
+}
+
+// Inputs returns the leaf fields the client set, in precedence order.
+func (in Intent) Inputs() []string { return in.inputs }
+
+// Formats names the request shapes the client's fields belong to, so logs
+// can say what was translated from. chat_template_kwargs is shared by
+// llama.cpp, vLLM and SGLang, so it is named as itself.
+func (in Intent) Formats() []string {
+	out := make([]string, 0, 2)
+	for _, f := range in.inputs {
+		name := formatOf(f)
+		found := false
+		for _, o := range out {
+			if o == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func formatOf(field string) string {
+	switch {
+	case field == fieldReasoningEffort:
+		return "openai"
+	case field == fieldIncludeReasoning, strings.HasPrefix(field, fieldReasoning+"."):
+		return "openrouter"
+	case strings.HasPrefix(field, fieldChatTemplateKwargs+"."):
+		return fieldChatTemplateKwargs
+	case field == fieldLlamaCppBudget, field == fieldThinkingBudget:
+		return "llamacpp"
+	case field == fieldVLLMBudget:
+		return "vllm"
+	case field == fieldSGLangBudget:
+		return "sglang"
+	case field == fieldThink:
+		return "ollama"
+	}
+	return field
 }
 
 // Conflict records an input field whose value lost to a higher-precedence one.
@@ -83,6 +130,7 @@ type collector struct {
 	budget  []candidate[int]
 	exclude []candidate[bool]
 	fields  []string
+	inputs  []string
 }
 
 // addEffort records an effort and the on/off state it implies: "none" means
@@ -98,6 +146,7 @@ func (c *collector) addEffort(field string, raw gjson.Result) bool {
 	}
 	c.effort = append(c.effort, candidate[string]{val: effort, field: field})
 	c.enabled = append(c.enabled, candidate[bool]{val: effort != EffortNone, field: field})
+	c.inputs = append(c.inputs, field)
 	return true
 }
 
@@ -110,6 +159,7 @@ func (c *collector) addBool(list *[]candidate[bool], field string, raw gjson.Res
 		v = !v
 	}
 	*list = append(*list, candidate[bool]{val: v, field: field})
+	c.inputs = append(c.inputs, field)
 	return true
 }
 
@@ -128,6 +178,7 @@ func (c *collector) addBudget(field string, raw gjson.Result) bool {
 	if n == 0 {
 		c.enabled = append(c.enabled, candidate[bool]{val: false, field: field})
 	}
+	c.inputs = append(c.inputs, field)
 	return true
 }
 
@@ -158,6 +209,7 @@ func Parse(body []byte) (in Intent, conflicts []Conflict, present bool) {
 	}
 
 	in.fields = c.fields
+	in.inputs = c.inputs
 	if v, ok := pick(c.enabled, SettingEnabled, &conflicts); ok {
 		in.Enabled = &v
 	}

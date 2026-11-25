@@ -50,6 +50,7 @@ func TestParse_InputForms(t *testing.T) {
 			require.True(t, present)
 			assert.Empty(t, conflicts)
 			got.fields = nil
+			got.inputs = nil
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -364,6 +365,36 @@ func TestResolveDialect(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.want, ResolveDialect(tt.override, tt.typ, tt.u, tt.profile))
+		})
+	}
+}
+
+func TestIntent_InputsAndFormats(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		body    string
+		inputs  []string
+		formats []string
+	}{
+		{"openrouter object", `{"reasoning":{"enabled":false,"effort":"none"}}`,
+			[]string{"reasoning.enabled", "reasoning.effort"}, []string{"openrouter"}},
+		{"openai flat", `{"reasoning_effort":"high"}`,
+			[]string{"reasoning_effort"}, []string{"openai"}},
+		{"llama.cpp kwargs and budget", `{"chat_template_kwargs":{"enable_thinking":true},"reasoning_budget_tokens":256}`,
+			[]string{"chat_template_kwargs.enable_thinking", "reasoning_budget_tokens"}, []string{"chat_template_kwargs", "llamacpp"}},
+		{"mixed, deduped in precedence order", `{"think":true,"reasoning_effort":"low","include_reasoning":false,"reasoning":{"effort":"low"}}`,
+			[]string{"reasoning.effort", "reasoning_effort", "include_reasoning", "think"}, []string{"openrouter", "openai", "ollama"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			in, _, present := Parse([]byte(tt.body))
+			require.True(t, present)
+			assert.Equal(t, tt.inputs, in.Inputs())
+			assert.Equal(t, tt.formats, in.Formats())
 		})
 	}
 }

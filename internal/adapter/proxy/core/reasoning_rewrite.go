@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/thushan/olla/internal/adapter/reasoning"
 	"github.com/thushan/olla/internal/core/constants"
@@ -84,8 +85,18 @@ func RewriteReasoningForEndpoint(r *http.Request, w http.ResponseWriter, endpoin
 			log.Debug("Reasoning exclude has no equivalent on this backend, reasoning text will be returned",
 				"request_id", requestID, "endpoint", endpoint.Name, "dialect", dialect)
 		}
-		log.Debug("Reasoning controls rewritten for backend",
-			"request_id", requestID, "endpoint", endpoint.Name, "dialect", dialect)
+		// Only a real change is worth an info line; a client already speaking
+		// the backend's dialect renders back to the same bytes.
+		if !bytes.Equal(rendered, body) {
+			out, _, _ := reasoning.Parse(rendered)
+			log.Info("Reasoning parameters translated",
+				"request_id", requestID,
+				"endpoint", endpoint.Name,
+				"from", strings.Join(intent.Formats(), ","),
+				"to", dialect,
+				"from_fields", strings.Join(intent.Inputs(), ","),
+				"to_fields", strings.Join(out.Inputs(), ","))
+		}
 	}
 
 	r.Body = io.NopCloser(bytes.NewReader(rendered))

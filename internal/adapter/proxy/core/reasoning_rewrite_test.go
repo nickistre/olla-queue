@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/thushan/olla/internal/core/constants"
 	"github.com/thushan/olla/internal/core/domain"
+	"github.com/thushan/olla/internal/logger"
 )
 
 func newReasoningRequest(body string) *http.Request {
@@ -105,4 +107,38 @@ func TestRewriteReasoningForEndpoint_ClearsStaleHeader(t *testing.T) {
 	RewriteReasoningForEndpoint(r, w, &domain.Endpoint{ReasoningDialect: constants.ReasoningDialectPassthrough}, "/v1/chat/completions", "req", nil)
 
 	assert.Empty(t, w.Header().Get(constants.HeaderXOllaReasoningConflict))
+}
+
+func TestRewriteReasoningForEndpoint_LogsTranslation(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	log := logger.NewPlainStyledLogger(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	ep := &domain.Endpoint{Name: "local", ReasoningDialect: constants.ReasoningDialectLlamaCpp}
+
+	r := newReasoningRequest(`{"model":"m","reasoning":{"enabled":false,"effort":"none"}}`)
+	RewriteReasoningForEndpoint(r, httptest.NewRecorder(), ep, "/v1/chat/completions", "req-log", log)
+
+	var entry map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &entry))
+	assert.Equal(t, "INFO", entry["level"])
+	assert.Equal(t, "Reasoning parameters translated", entry["msg"])
+	assert.Equal(t, "req-log", entry["request_id"])
+	assert.Equal(t, "openrouter", entry["from"])
+	assert.Equal(t, "llamacpp", entry["to"])
+	assert.Equal(t, "reasoning.enabled,reasoning.effort", entry["from_fields"])
+	assert.Contains(t, entry["to_fields"], "chat_template_kwargs.enable_thinking")
+}
+
+func TestRewriteReasoningForEndpoint_NoInfoLogWhenUnchanged(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	log := logger.NewPlainStyledLogger(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	ep := &domain.Endpoint{Name: "local", ReasoningDialect: constants.ReasoningDialectOpenAI}
+
+	r := newReasoningRequest(`{"model":"m","reasoning_effort":"low"}`)
+	RewriteReasoningForEndpoint(r, httptest.NewRecorder(), ep, "/v1/chat/completions", "req-same", log)
+
+	assert.Empty(t, buf.String(), "a body already in the backend's dialect is not a translation")
 }
