@@ -33,18 +33,24 @@
 
 ## About This Fork
 
-This is a fork of [thushan/olla](https://github.com/thushan/olla) that adds a **request queue** for a home LLM cluster, where most nodes run llama.cpp behind [llama-swap](https://github.com/mostlygeek/llama-swap) and have only a slot or two per model. Upstream Olla has no capacity concept: it forwards every request and lets the backend queue it, which can trigger model swaps or overload a node. This fork makes Olla hold requests until a slot is free instead.
+This is a fork of [thushan/olla](https://github.com/thushan/olla) built for a home LLM cluster, where most nodes run llama.cpp behind [llama-swap](https://github.com/mostlygeek/llama-swap) and have only a slot or two per model, with a hosted provider such as OpenRouter as overflow. Upstream Olla has no capacity concept: it forwards every request and lets the backend queue it, which can trigger model swaps or overload a node. This fork makes Olla hold requests until a slot is free, spill over to an overflow endpoint only when local nodes stay busy, and speak each backend's reasoning dialect.
 
-What the fork adds (all opt-in via `proxy.queue.enabled`):
+### Request queue (opt-in via `proxy.queue.enabled`)
 
 - **Slot-aware queue**: requests wait FIFO (with skip-ahead) when every candidate endpoint is full, and get a 503 with `Retry-After` when the queue is full or the wait times out.
-- **Per-endpoint, per-model and per-group limits**: slots are discovered from llama.cpp (`/props`, router `/models`) and llama-swap (`/running`) without ever triggering a model load. They can be overridden with `max_concurrent` and endpoint `slot_groups`.
+- **Per-endpoint, per-model and per-group limits**: slots are discovered from llama.cpp (`/props`, router `/models`) and llama-swap (`/running`) without ever triggering a model load. They can be overridden with `max_concurrent` and endpoint `slot_groups`. Per endpoint, `slot_refresh_interval` sets its own probe interval and `discover_slots: false` skips probing.
 - **Outside traffic tracking**: requests that other clients send straight to a backend count as taken slots (llama-swap `/api/events`, llama.cpp `/slots`).
-- **Cold-model gate**: a model that isn't loaded gets one slot, so Olla doesn't pile requests onto a node that is mid-swap.
-- **Smarter dispatch**: an optional sticky-session hold (`proxy.sticky_sessions.hold_seconds`), loaded models run before cold ones, and nodes that already have a model loaded are preferred.
-- **Dashboard**: queue depth and mean wait on the Overview, plus a Queue tab listing waiting requests and slot usage.
+- **Swap protection**: a model that isn't loaded gets one slot, and a request never runs beside in-flight work for a different model when either is cold, so a node is never swapped out from under its running requests.
+- **Smarter dispatch**: an optional sticky-session hold (`proxy.sticky_sessions.hold_seconds`), loaded models run before cold ones (capped by `warm_first_max_wait`), `swap_grace` briefly holds a swap for the loaded model's next turn, and nodes that already have a model loaded are preferred.
+- **Overflow endpoints**: endpoint `queue_after` makes an endpoint usable only once a request has waited that long, and then only as a last resort among free endpoints. Pair it with `sticky_sessions: false` on that endpoint so a spill-over never re-pins the conversation away from the local node's KV cache (reported as `X-Olla-Sticky-Session: bypass`).
+- **Health-aware waiting**: the queue tracks offline endpoints itself and re-runs endpoint lookup for waiters when a node recovers.
+- **Dashboard**: queue depth and mean wait on the Overview, plus a Queue tab with waiting requests, per-endpoint and slot group usage, status, and a count of requests sent to overflow endpoints.
 
-Work happens on feature branches here, never merged back to `main`, which tracks upstream. See [the request queue concept page](docs/content/concepts/request-queue.md) for configuration and behaviour.
+### Reasoning parameter translation (on by default, `proxy.reasoning_translation`)
+
+Clients set reasoning in different shapes: OpenRouter's `reasoning: {effort, enabled, max_tokens, exclude}`, OpenAI's `reasoning_effort`, llama.cpp/vLLM `chat_template_kwargs.enable_thinking`, budget fields, Ollama's `think`, or Anthropic `thinking`. The fork accepts any of them, resolves them into one intent and, on every attempt, rewrites it in the dialect of the endpoint actually chosen (llama.cpp, OpenRouter, vLLM, SGLang, Ollama, LM Studio or plain OpenAI). A request that fails over from llama.cpp to OpenRouter is re-rendered from the original body. Conflicting forms resolve by a fixed precedence and are reported in `X-Olla-Reasoning-Conflict`. The dialect comes from the profile, an `openrouter.ai` host, or an endpoint `reasoning_dialect` override (e.g. `llamacpp` for llama-swap behind an `openai-compatible` entry). Requests without reasoning fields pass through untouched.
+
+Work happens on feature branches here, never merged back to `main`, which tracks upstream. See the [request queue](docs/content/concepts/request-queue.md) and [reasoning translation](docs/content/concepts/reasoning-translation.md) concept pages for configuration and behaviour.
 
 [Olla](https://tensorfoundry.io/products/olla) is a high-performance, low-overhead, low-latency proxy and load balancer for managing LLM infrastructure. It intelligently routes LLM requests across self-hosted inference nodes with a [wide variety](https://thushan.github.io/olla/integrations/overview/) of natively supported endpoints and extensible enough to support others. Olla provides model discovery and unified model catalogues within each provider, enabling seamless routing to available models on compatible endpoints.
 
