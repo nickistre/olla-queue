@@ -54,13 +54,15 @@ Olla removes every reasoning field it recognised, then writes the target dialect
 | Dialect | Writes |
 |---|---|
 | `openrouter` | `reasoning: {effort \| max_tokens, enabled, exclude}`. Either `max_tokens` (when a budget is known) or `effort`, never both. Off is `{enabled: false, effort: "none"}`. `max` is sent as `xhigh`. |
-| `llamacpp` | `reasoning_effort` clamped for gpt-oss templates (`minimal` to `low`, `xhigh`/`max` to `high`), `chat_template_kwargs.enable_thinking` and `.thinking` (Qwen/GLM read the first, DeepSeek V3.1/Granite the second), and `reasoning_budget_tokens` (0 when off). |
-| `vllm` | clamped `reasoning_effort`, `chat_template_kwargs.enable_thinking`/`.thinking`, `thinking_token_budget`, and `include_reasoning: false` when Exclude is set. |
-| `sglang` | clamped `reasoning_effort`, `chat_template_kwargs.enable_thinking`/`.thinking`, `thinking_budget`. |
+| `llamacpp` | `reasoning_effort` as the client sent it, `chat_template_kwargs.enable_thinking` and `.thinking` (Qwen/GLM read the first, DeepSeek V3.1/Granite the second), and `reasoning_budget_tokens` (0 when off). |
+| `vllm` | `reasoning_effort` as sent, `chat_template_kwargs.enable_thinking`/`.thinking`, `thinking_token_budget`, and `include_reasoning: false` when Exclude is set. |
+| `sglang` | `reasoning_effort` as sent, `chat_template_kwargs.enable_thinking`/`.thinking`, `thinking_budget`. |
 | `ollama` | On `/v1` paths: `reasoning_effort` (`none` when off). On `/api/chat` and `/api/generate`: `think` as a bool or a level. |
 | `lmstudio` | `reasoning_effort` clamped to `none`, `low`, `medium`, `high`. |
 | `openai` | `reasoning_effort` only (`none` when off). Generic OpenAI-compatible, LiteLLM, Lemonade, LMDeploy, Docker Model Runner, oMLX. |
 | `passthrough` | Nothing changes. Text Embeddings Inference, and any endpoint that opts out. |
+
+llama.cpp, vLLM and SGLang hand the effort to the model's chat template, and templates disagree on the levels they accept: gpt-oss takes `low`, `medium` and `high`, while Qwen3.8 takes `low`, `medium` and `xhigh` and rejects `high`. Some templates, such as Qwen3.6, have no effort setting at all and only switch thinking on or off. Olla therefore passes the effort through unchanged for these dialects rather than map it to levels one model would reject; send a level the model's template supports.
 
 Exclude has no request switch on most local backends. Olla logs it at debug level and the reasoning text comes back as usual.
 

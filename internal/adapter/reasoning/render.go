@@ -197,13 +197,18 @@ func (r *renderer) openRouter(original jsoniter.RawMessage) error {
 	return r.set(fieldReasoning, obj)
 }
 
-// local covers llama.cpp, vLLM and SGLang: an effort for gpt-oss style
-// templates, both template switches (Qwen and GLM read enable_thinking,
+// local covers llama.cpp, vLLM and SGLang: the client's effort unchanged,
+// both template switches (Qwen and GLM read enable_thinking,
 // DeepSeek V3.1 and Granite read thinking; Jinja ignores the other) and the
 // backend's own budget field. llama.cpp also gets an explicit zero budget
 // when off, for builds that predate the template switches.
+//
+// The effort is not clamped: these servers hand it to the model's chat
+// template, and templates disagree on the levels (gpt-oss takes low, medium,
+// high; Qwen3.8 takes low, medium, xhigh and rejects high), so any mapping
+// breaks some model. The template's own error is clearer than a silent swap.
 func (r *renderer) local(budgetField string, zeroBudgetWhenOff bool) error {
-	if effort := clampLocal(r.in.Effort); effort != "" && !r.disabled() {
+	if effort := r.in.Effort; effort != "" && effort != EffortNone && !r.disabled() {
 		if err := r.set(fieldReasoningEffort, effort); err != nil {
 			return err
 		}
@@ -250,8 +255,8 @@ func (r *renderer) effortWithOff(clamp func(string) string) error {
 	return nil
 }
 
-// clampLocal maps an effort onto low/medium/high, the only levels gpt-oss
-// templates and most local servers accept. "none" maps to empty because off
+// clampLocal maps an effort onto low/medium/high for Ollama and LM Studio,
+// whose servers (not the model template) accept only those levels. "none" maps to empty because off
 // is expressed by the template switches instead.
 func clampLocal(effort string) string {
 	switch effort {

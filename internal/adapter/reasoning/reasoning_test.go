@@ -248,18 +248,18 @@ func TestRender_Dialects(t *testing.T) {
 			`{"model":"m","reasoning_effort":"high","chat_template_kwargs":{"enable_thinking":true,"thinking":true}}`},
 		{"llamacpp off", off, constants.ReasoningDialectLlamaCpp, chat,
 			`{"model":"m","chat_template_kwargs":{"enable_thinking":false,"thinking":false},"reasoning_budget_tokens":0}`},
-		{"llamacpp clamps", budget, constants.ReasoningDialectLlamaCpp, chat,
-			`{"model":"m","reasoning_effort":"high","chat_template_kwargs":{"enable_thinking":true,"thinking":true},"reasoning_budget_tokens":4096}`},
-		{"llamacpp minimal is low", minimal, constants.ReasoningDialectLlamaCpp, chat,
-			`{"model":"m","reasoning_effort":"low","chat_template_kwargs":{"enable_thinking":true,"thinking":true}}`},
+		{"llamacpp keeps xhigh for Qwen3.8 templates", budget, constants.ReasoningDialectLlamaCpp, chat,
+			`{"model":"m","reasoning_effort":"xhigh","chat_template_kwargs":{"enable_thinking":true,"thinking":true},"reasoning_budget_tokens":4096}`},
+		{"llamacpp keeps minimal", minimal, constants.ReasoningDialectLlamaCpp, chat,
+			`{"model":"m","reasoning_effort":"minimal","chat_template_kwargs":{"enable_thinking":true,"thinking":true}}`},
 
 		// vLLM / SGLang
 		{"vllm", budget, constants.ReasoningDialectVLLM, chat,
-			`{"model":"m","reasoning_effort":"high","chat_template_kwargs":{"enable_thinking":true,"thinking":true},"thinking_token_budget":4096,"include_reasoning":false}`},
+			`{"model":"m","reasoning_effort":"xhigh","chat_template_kwargs":{"enable_thinking":true,"thinking":true},"thinking_token_budget":4096,"include_reasoning":false}`},
 		{"vllm off", off, constants.ReasoningDialectVLLM, chat,
 			`{"model":"m","chat_template_kwargs":{"enable_thinking":false,"thinking":false}}`},
 		{"sglang", budget, constants.ReasoningDialectSGLang, chat,
-			`{"model":"m","reasoning_effort":"high","chat_template_kwargs":{"enable_thinking":true,"thinking":true},"thinking_budget":4096}`},
+			`{"model":"m","reasoning_effort":"xhigh","chat_template_kwargs":{"enable_thinking":true,"thinking":true},"thinking_budget":4096}`},
 
 		// Ollama
 		{"ollama v1", high, constants.ReasoningDialectOllama, chat,
