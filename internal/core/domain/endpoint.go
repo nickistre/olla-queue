@@ -53,6 +53,10 @@ type Endpoint struct {
 	// AuthHeaderValue is the fully composed header value (e.g. "Bearer tok", "Basic base64(...)").
 	// Never serialised; leaking credentials through logs or status endpoints would be a security issue.
 	AuthHeaderValue string `json:"-"`
+	// ReasoningDialect is the request shape this endpoint reads reasoning
+	// controls in, resolved once at load (see reasoning.ResolveDialect).
+	// "passthrough" or empty leaves request bodies alone.
+	ReasoningDialect string `json:"-"`
 	// SlotGroups partition the endpoint's models for the request queue.
 	SlotGroups    []SlotGroup `json:"-"`
 	LastLatency   time.Duration
@@ -64,17 +68,17 @@ type Endpoint struct {
 	// QueueAfter is how long a request must have waited in the queue before it
 	// may use this endpoint; 0 = no delay.
 	QueueAfter time.Duration
-	// NoSticky stops sticky sessions pinning to this endpoint; requests it
-	// serves leave any existing pin in place.
-	NoSticky bool
 	// SlotRefreshInterval overrides the queue-wide slot discovery interval;
 	// 0 = the queue-wide value.
 	SlotRefreshInterval time.Duration
-	// NoSlotDiscovery turns slot discovery off for this endpoint.
-	NoSlotDiscovery     bool
 	ConsecutiveFailures int
 	BackoffMultiplier   int
-	PreservePath        bool
+	// NoSticky stops sticky sessions pinning to this endpoint; requests it
+	// serves leave any existing pin in place.
+	NoSticky bool
+	// NoSlotDiscovery turns slot discovery off for this endpoint.
+	NoSlotDiscovery bool
+	PreservePath    bool
 }
 
 func (e *Endpoint) GetURLString() string {

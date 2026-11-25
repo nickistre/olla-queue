@@ -108,6 +108,15 @@ proxy:
   #   max_attempts: 0         # 0 = every eligible endpoint once; N caps attempts
   #   non_idempotent: true    # false = POST/PATCH/DELETE are not replayed after a connection failure
 
+  # Reasoning translation: clients set thinking/effort in different shapes
+  # (OpenRouter's reasoning{}, reasoning_effort, chat_template_kwargs,
+  # llama.cpp/vLLM/SGLang budget fields, Ollama's think). Olla folds them into
+  # one setting and writes it in the shape each backend reads, per attempt, so
+  # a failover to a different backend type still works. Each endpoint's shape
+  # comes from its profile; set reasoning_dialect on an endpoint to override.
+  # See https://thushan.github.io/olla/concepts/reasoning-translation/
+  reasoning_translation: true  # false = forward reasoning fields untouched
+
   # DEPRECATED as of v0.0.16 - these do nothing; set proxy.retry above instead.
   # max_retries: 3
   # retry_backoff: 500ms
@@ -144,6 +153,28 @@ discovery:
         health_check_url: "/health"
         check_interval: 5s
         check_timeout: 2s
+      # Overflow to OpenRouter for a local llama.cpp fleet (needs proxy.queue).
+      # The openrouter.ai host selects the OpenRouter reasoning dialect, so
+      # reasoning_effort sent for llama.cpp arrives as reasoning: {effort}.
+      #
+      # - url: "https://openrouter.ai/api"
+      #   name: "openrouter-overflow"
+      #   type: "openai-compatible"
+      #   priority: 10
+      #   queue_after: 20s
+      #   sticky_sessions: false
+      #   auth:
+      #     type: bearer
+      #     token: "${OPENROUTER_API_KEY}"
+      #
+      # llama-swap fronted as openai-compatible still runs llama.cpp, so tell
+      # Olla which reasoning shape it reads:
+      #
+      # - url: "http://localhost:9292"
+      #   name: "llama-swap"
+      #   type: "openai-compatible"
+      #   reasoning_dialect: "llamacpp"  # openrouter, llamacpp, vllm, sglang, ollama, lmstudio, openai, passthrough
+      #
       # Backends behind credentials use an auth: block, not userinfo in the URL.
       # An embedded user:pass@host form is rejected at startup to keep secrets
       # out of status/dashboard JSON. Inline values support ${VAR}; use

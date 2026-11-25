@@ -83,6 +83,7 @@ request:
   model_field_paths:
     - "model"
   response_format: "sglang"
+  reasoning_dialect: "sglang"  # request shape for reasoning controls, see concepts/reasoning-translation
   parsing_rules:
     chat_completions_path: "/v1/chat/completions"
     completions_path: "/v1/completions"

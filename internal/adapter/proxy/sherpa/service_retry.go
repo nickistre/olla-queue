@@ -72,6 +72,9 @@ func (s *Service) proxyToSingleEndpoint(ctx context.Context, w http.ResponseWrit
 
 	// Rewrite model name in request body if this is an alias-resolved request
 	core.RewriteModelForAlias(ctx, r, endpoint)
+	// Reasoning controls follow the endpoint too, so an overflow onto a
+	// different backend type still gets them in a shape it reads.
+	core.RewriteReasoningForEndpoint(r, w, endpoint, targetURL.Path, stats.RequestID, rlog)
 
 	proxyReq, err := http.NewRequestWithContext(ctx, r.Method, targetURL.String(), r.Body)
 	if err != nil {

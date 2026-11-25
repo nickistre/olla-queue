@@ -45,6 +45,9 @@ type DiscoveryService struct {
 	// modelsUpdatedFn, when set, is called after an endpoint's models are
 	// (re)discovered, so queued requests can gain it as a candidate.
 	modelsUpdatedFn atomic.Pointer[func(*domain.Endpoint)]
+	// reasoningTranslation mirrors proxy.reasoning_translation; endpoints are
+	// given the passthrough dialect when it is off.
+	reasoningTranslation bool
 }
 
 // NewDiscoveryService creates a new discovery service
@@ -55,16 +58,64 @@ func NewDiscoveryService(
 	logger logger.StyledLogger,
 ) *DiscoveryService {
 	return &DiscoveryService{
-		config:         config,
-		registryConfig: registryConfig,
-		statsCollector: statsCollector,
-		logger:         logger,
+		config:               config,
+		registryConfig:       registryConfig,
+		statsCollector:       statsCollector,
+		logger:               logger,
+		reasoningTranslation: true,
 	}
+}
+
+// SetReasoningTranslation carries proxy.reasoning_translation into endpoint
+// loading. Call before Start.
+func (s *DiscoveryService) SetReasoningTranslation(enabled bool) {
+	s.reasoningTranslation = enabled
 }
 
 // Name returns the service name
 func (s *DiscoveryService) Name() string {
 	return "discovery"
+}
+
+// createRegistry builds the model registry from configuration.
+func (s *DiscoveryService) createRegistry() error {
+	if s.registryConfig == nil {
+		// Fallback to default if no config provided
+		s.registry = registry.NewMemoryModelRegistry(s.logger)
+		return nil
+	}
+	registryConfig := registry.RegistryConfig{
+		Type:            s.registryConfig.Type,
+		EnableUnifier:   s.registryConfig.EnableUnifier,
+		UnificationConf: &s.registryConfig.Unification,
+		// Routing strategy must be forwarded so the configured type (strict,
+		// optimistic, discovery) takes effect. Without this, registries fall
+		// back to strict regardless of what the operator configured.
+		RoutingStrategy: &s.registryConfig.RoutingStrategy,
+	}
+	var err error
+	s.registry, err = registry.NewModelRegistry(registryConfig, s.logger)
+	if err != nil {
+		return fmt.Errorf("failed to create model registry: %w", err)
+	}
+	return nil
+}
+
+// loadEndpointRepository builds the endpoint repository for the configured
+// discovery type.
+func (s *DiscoveryService) loadEndpointRepository(ctx context.Context) error {
+	switch s.config.Type {
+	case "static":
+		staticRepo := discovery.NewStaticEndpointRepository()
+		staticRepo.SetReasoningTranslation(s.reasoningTranslation)
+		if err := staticRepo.LoadFromConfig(ctx, s.config.Static.Endpoints); err != nil {
+			return fmt.Errorf("failed to load endpoints from config: %w", err)
+		}
+		s.endpointRepo = staticRepo
+		return nil
+	default:
+		return fmt.Errorf("unsupported discovery type: %s", s.config.Type)
+	}
 }
 
 // Start initialises discovery components
@@ -79,36 +130,12 @@ func (s *DiscoveryService) Start(ctx context.Context) error {
 		s.statsCollector = collector
 	}
 
-	// Create model registry using factory with configuration
-	if s.registryConfig == nil {
-		// Fallback to default if no config provided
-		s.registry = registry.NewMemoryModelRegistry(s.logger)
-	} else {
-		registryConfig := registry.RegistryConfig{
-			Type:            s.registryConfig.Type,
-			EnableUnifier:   s.registryConfig.EnableUnifier,
-			UnificationConf: &s.registryConfig.Unification,
-			// Routing strategy must be forwarded so the configured type (strict,
-			// optimistic, discovery) takes effect. Without this, registries fall
-			// back to strict regardless of what the operator configured.
-			RoutingStrategy: &s.registryConfig.RoutingStrategy,
-		}
-		var err error
-		s.registry, err = registry.NewModelRegistry(registryConfig, s.logger)
-		if err != nil {
-			return fmt.Errorf("failed to create model registry: %w", err)
-		}
+	if err := s.createRegistry(); err != nil {
+		return err
 	}
 
-	switch s.config.Type {
-	case "static":
-		staticRepo := discovery.NewStaticEndpointRepository()
-		if err := staticRepo.LoadFromConfig(ctx, s.config.Static.Endpoints); err != nil {
-			return fmt.Errorf("failed to load endpoints from config: %w", err)
-		}
-		s.endpointRepo = staticRepo
-	default:
-		return fmt.Errorf("unsupported discovery type: %s", s.config.Type)
+	if err := s.loadEndpointRepository(ctx); err != nil {
+		return err
 	}
 
 	s.healthChecker = health.NewHTTPHealthCheckerWithDefaults(s.endpointRepo, s.logger)

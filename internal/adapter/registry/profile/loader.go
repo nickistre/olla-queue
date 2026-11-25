@@ -247,6 +247,7 @@ func (l *ProfileLoader) loadBuiltInProfilesInto(profiles map[string]domain.Infer
 		},
 	}
 	ollamaConfig.Request.ResponseFormat = "ollama"
+	ollamaConfig.Request.ReasoningDialect = constants.ReasoningDialectOllama
 	ollamaConfig.Request.ModelFieldPaths = []string{DefaultModelKey}
 	ollamaConfig.Request.ParsingRules.ChatCompletionsPath = "/api/chat"
 	ollamaConfig.Request.ParsingRules.CompletionsPath = "/api/generate"
@@ -375,6 +376,7 @@ func (l *ProfileLoader) loadBuiltInProfilesInto(profiles map[string]domain.Infer
 		},
 	}
 	lmStudioConfig.Request.ResponseFormat = "lmstudio"
+	lmStudioConfig.Request.ReasoningDialect = constants.ReasoningDialectLMStudio
 	lmStudioConfig.Request.ModelFieldPaths = []string{DefaultModelKey}
 	lmStudioConfig.Request.ParsingRules.ChatCompletionsPath = constants.PathV1ChatCompletions
 	lmStudioConfig.Request.ParsingRules.CompletionsPath = constants.PathV1Completions
@@ -473,6 +475,7 @@ func (l *ProfileLoader) loadBuiltInProfilesInto(profiles map[string]domain.Infer
 		},
 	}
 	openAIConfig.Request.ResponseFormat = "openai"
+	openAIConfig.Request.ReasoningDialect = constants.ReasoningDialectOpenAI
 	openAIConfig.Request.ModelFieldPaths = []string{DefaultModelKey}
 	openAIConfig.Request.ParsingRules.ChatCompletionsPath = constants.PathV1ChatCompletions
 	openAIConfig.Request.ParsingRules.CompletionsPath = constants.PathV1Completions
@@ -588,6 +591,7 @@ func (l *ProfileLoader) loadLlamaCppBuiltIn(profiles map[string]domain.Inference
 		},
 	}
 	llamaCppConfig.Request.ResponseFormat = constants.ProviderTypeLlamaCpp
+	llamaCppConfig.Request.ReasoningDialect = constants.ReasoningDialectLlamaCpp
 	llamaCppConfig.Request.ModelFieldPaths = []string{DefaultModelKey}
 	llamaCppConfig.Request.ParsingRules.ChatCompletionsPath = constants.PathV1ChatCompletions
 	llamaCppConfig.Request.ParsingRules.CompletionsPath = constants.PathV1Completions

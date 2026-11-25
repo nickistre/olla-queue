@@ -372,6 +372,7 @@ request:
     - "model"
     - "model_name"
   response_format: "ollama"       # Response parser type
+  reasoning_dialect: "ollama"     # Shape for reasoning controls, see Reasoning Translation
   parsing_rules:
     chat_completions_path: "/api/chat"
     completions_path: "/api/generate"

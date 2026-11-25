@@ -94,6 +94,7 @@ request:
   model_field_paths:
     - "model"
   response_format: "text-embeddings-inference"
+  reasoning_dialect: "passthrough"  # request shape for reasoning controls, see concepts/reasoning-translation
   parsing_rules:
     model_field_name: "model"
     supports_streaming: false

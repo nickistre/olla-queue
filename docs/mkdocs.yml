@@ -149,6 +149,7 @@ nav:
       - Model Unification: concepts/model-unification.md
       - Health Checking: concepts/health-checking.md
       - API Translation: concepts/api-translation.md
+      - Reasoning Translation: concepts/reasoning-translation.md
       - Proxy Engines:
           - Overview: concepts/proxy-engines.md
           - Proxy Profiles: concepts/proxy-profiles.md

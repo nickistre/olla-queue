@@ -89,6 +89,7 @@ request:
   model_field_paths:
     - "model"
   response_format: "docker-model-runner"
+  reasoning_dialect: "openai"  # request shape for reasoning controls, see concepts/reasoning-translation
   parsing_rules:
     chat_completions_path: "/engines/v1/chat/completions"
     completions_path: "/engines/v1/completions"

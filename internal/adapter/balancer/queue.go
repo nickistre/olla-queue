@@ -206,16 +206,16 @@ type QueueWrapper struct {
 	// down holds endpoints the health checker has reported offline, with when.
 	// A request's endpoint copies are snapshots from when it arrived, so their
 	// Status goes stale while it waits; this is the live view.
-	down    map[string]time.Time
-	waiters list.List
-	stats   queueCounters
-	cfg     config.QueueConfig
-	holdFor time.Duration
+	down map[string]time.Time
 	// grace holds, per swap domain (slot group, else endpoint), when the swap
 	// grace for the model that last finished there ends; see startGraceLocked.
 	grace map[string]swapGrace
 	// overflowed counts requests sent to each overflow endpoint, by URL.
 	overflowed map[string]uint64
+	waiters    list.List
+	stats      queueCounters
+	cfg        config.QueueConfig
+	holdFor    time.Duration
 	mu         sync.Mutex
 	closed     bool
 }

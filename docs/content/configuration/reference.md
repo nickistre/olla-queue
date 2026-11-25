@@ -249,6 +249,19 @@ With sticky sessions on, a failover moves the session's pin to the endpoint that
 
 **Deprecated:** `proxy.max_retries` and `proxy.retry_backoff` are still parsed but do nothing, and Olla logs a warning at startup when either is set to a non-zero value (an explicit `0` cannot be told from unset). They are not mapped onto `proxy.retry`; set that block instead. They will be removed in v0.1.0.
 
+### Reasoning Translation {#reasoning-translation}
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `reasoning_translation` | bool | `true` | Rewrite reasoning controls (`reasoning{}`, `reasoning_effort`, `chat_template_kwargs.enable_thinking`, budget fields, `think`) into the shape each endpoint reads, per attempt. `false` forwards them exactly as sent |
+
+Each endpoint's dialect comes from its profile, an `openrouter.ai` host, or `static.endpoints[].reasoning_dialect`. See [Reasoning Translation](../concepts/reasoning-translation.md).
+
+```yaml
+proxy:
+  reasoning_translation: true
+```
+
 ### Streaming Settings
 
 | Field | Type | Default | Description |
@@ -394,6 +407,7 @@ discovery:
 | `static.endpoints[].max_concurrent` | int | No | Request queue slot limit for this endpoint; `0` (default) = discover or use `proxy.queue.default_slots`. Only used when `proxy.queue.enabled` is true |
 | `static.endpoints[].queue_after` | duration | No | Makes this an [overflow endpoint](../concepts/request-queue.md#overflow-endpoints): a request uses it only after waiting this long in the queue, or when no other endpoint for it is up. `0` (default) = no delay. Needs `proxy.queue.enabled`; must be shorter than `proxy.queue.timeout` |
 | `static.endpoints[].sticky_sessions` | bool | No | `false` stops [sticky sessions](../concepts/sticky-sessions.md#endpoints-that-never-take-a-pin) pinning to this endpoint: requests it serves leave the existing pin in place (`X-Olla-Sticky-Session: bypass`). Unset or `true` = normal. Suited to overflow endpoints |
+| `static.endpoints[].reasoning_dialect` | string | No | Shape reasoning controls are written in for this endpoint: `openrouter`, `llamacpp`, `vllm`, `sglang`, `ollama`, `lmstudio`, `openai` or `passthrough`. Unset = `openrouter` for an `openrouter.ai` host on `openai-compatible`, else the profile default. Use `llamacpp` for llama-swap behind `openai-compatible`. See [Reasoning Translation](../concepts/reasoning-translation.md) |
 | `static.endpoints[].slot_refresh_interval` | duration | No | Slot discovery interval for this endpoint; `0` (default) = `proxy.queue.slot_refresh_interval` |
 | `static.endpoints[].discover_slots` | bool | No | `false` turns slot discovery (and so external load tracking) off for this endpoint. Unset follows `proxy.queue.discover_slots`; `true` can't turn it on when that is off |
 
@@ -947,6 +961,7 @@ These control startup behaviour and are read before the YAML config is loaded.
 | `OLLA_PROXY_RETRY_ENABLED` | `proxy.retry.enabled` | `true` (default) or `false`. |
 | `OLLA_PROXY_RETRY_MAX_ATTEMPTS` | `proxy.retry.max_attempts` | Integer. `0` tries every eligible endpoint once. |
 | `OLLA_PROXY_RETRY_NON_IDEMPOTENT` | `proxy.retry.non_idempotent` | `true` (default) or `false`. |
+| `OLLA_PROXY_REASONING_TRANSLATION` | `proxy.reasoning_translation` | `true` (default) or `false`. |
 | `OLLA_PROXY_STICKY_SESSIONS_ENABLED` | `proxy.sticky_sessions.enabled` | Only the master switch is exposed. Other sticky-session fields are YAML-only. |
 | `OLLA_PROXY_QUEUE_ENABLED` | `proxy.queue.enabled` | `true` or `false` (default). |
 | `OLLA_PROXY_QUEUE_MAX_SIZE` | `proxy.queue.max_size` | Integer, must be > 0 when the queue is enabled. |
@@ -1045,6 +1060,7 @@ proxy:
   response_header_timeout: 30s
   connection_keep_alive: 30s
   tls_handshake_timeout: 10s
+  reasoning_translation: true
   # retry:
   #   enabled: true
   #   max_attempts: 0         # 0 = every eligible endpoint once

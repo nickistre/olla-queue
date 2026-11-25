@@ -294,6 +294,9 @@ type ProxyConfig struct {
 	StreamBufferSize      int                  `yaml:"stream_buffer_size"`
 	MaxRetries            int                  `yaml:"max_retries"` // Deprecated: unused, set proxy.retry instead. TODO: Removal: v0.1.0
 	Retry                 RetryConfig          `yaml:"retry"`
+	// ReasoningTranslation rewrites reasoning controls into each endpoint's
+	// dialect. false forwards them exactly as the client sent them.
+	ReasoningTranslation bool `yaml:"reasoning_translation"`
 }
 
 // RetryConfig controls failover between endpoints for a single request. Only
@@ -352,12 +355,25 @@ type EndpointConfig struct {
 	// Priority uses a pointer so nil means "omitted in config" rather than explicitly zero.
 	// This lets applyEndpointDefaults distinguish "user set 0" from "user said nothing",
 	// since 0 is a valid, lower-than-default priority value.
-	Priority       *int   `yaml:"priority"`
+	Priority *int `yaml:"priority"`
+	// DiscoverSlots false turns slot discovery off for this endpoint (no
+	// /running, /props or /models probes, so no external load tracking
+	// either). Unset follows proxy.queue.discover_slots.
+	DiscoverSlots *bool `yaml:"discover_slots"`
+	// StickySessions false keeps sticky sessions from pinning to this
+	// endpoint: a request served here leaves the conversation's pin where it
+	// was, so an overflow node never takes over a local node's KV cache.
+	// Unset or true = normal sticky behaviour.
+	StickySessions *bool  `yaml:"sticky_sessions"`
 	URL            string `yaml:"url"`
 	Name           string `yaml:"name"`
 	Type           string `yaml:"type"`
 	HealthCheckURL string `yaml:"health_check_url"`
 	ModelURL       string `yaml:"model_url"`
+	// ReasoningDialect overrides the request shape reasoning controls are
+	// written in for this endpoint, e.g. "llamacpp" for llama-swap behind an
+	// openai-compatible type. Empty = the profile default.
+	ReasoningDialect string `yaml:"reasoning_dialect,omitempty"`
 	// SlotGroups split one node's models into separate capacity pools for the
 	// request queue, e.g. RAM-resident embedding models apart from GPU models
 	// that llama-swap swaps in and out of a single slot.
@@ -374,16 +390,7 @@ type EndpointConfig struct {
 	// SlotRefreshInterval overrides proxy.queue.slot_refresh_interval for
 	// this endpoint; 0 = the queue-wide value.
 	SlotRefreshInterval time.Duration `yaml:"slot_refresh_interval"`
-	// DiscoverSlots false turns slot discovery off for this endpoint (no
-	// /running, /props or /models probes, so no external load tracking
-	// either). Unset follows proxy.queue.discover_slots.
-	DiscoverSlots *bool `yaml:"discover_slots"`
-	// StickySessions false keeps sticky sessions from pinning to this
-	// endpoint: a request served here leaves the conversation's pin where it
-	// was, so an overflow node never takes over a local node's KV cache.
-	// Unset or true = normal sticky behaviour.
-	StickySessions *bool `yaml:"sticky_sessions"`
-	PreservePath   bool  `yaml:"preserve_path"`
+	PreservePath        bool          `yaml:"preserve_path"`
 }
 
 // SlotGroupConfig is one capacity pool on an endpoint. A model joins the first

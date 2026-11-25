@@ -340,10 +340,13 @@ func (h *RetryHandler) checkContextCancellation(ctx context.Context) error {
 	}
 }
 
-// resetRequestBodyForRetry recreates request body for retry attempts
+// resetRequestBodyForRetry recreates request body for retry attempts. The
+// length is reset too: per-attempt body rewrites (alias, reasoning) change it,
+// and a retry must not carry the previous attempt's length.
 func (h *RetryHandler) resetRequestBodyForRetry(r *http.Request, bodyBytes []byte, attemptCount int) {
 	if bodyBytes != nil && attemptCount > 0 {
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		r.ContentLength = int64(len(bodyBytes))
 	}
 }
 

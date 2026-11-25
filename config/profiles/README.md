@@ -108,6 +108,7 @@ request:
     - "model"
     - "model_name"
   response_format: "openai"      # Response parser: ollama, lmstudio, openai
+  reasoning_dialect: "openai"    # Shape for reasoning controls (see docs concepts/reasoning-translation)
   parsing_rules:
     chat_completions_path: "/api/chat"
     completions_path: "/api/completions"
@@ -157,6 +158,7 @@ Used for auto-detecting platform types:
 ### Request Section
 - `model_field_paths`: JSON paths to find model name in requests
 - `response_format`: Which parser to use (ollama, lmstudio, vllm, sglang, lemonade, text-embeddings-inference, openai)
+- `reasoning_dialect`: Shape reasoning controls are written in (openrouter, llamacpp, vllm, sglang, ollama, lmstudio, openai, passthrough); empty = passthrough
 - `parsing_rules`: How to parse different request types
 
 ## Examples

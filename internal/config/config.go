@@ -89,7 +89,8 @@ func DefaultConfig() *Config {
 			// Zero, not the old 3 and 500ms: both are deprecated and unused, and a
 			// non-zero default would make "operator set it" undetectable for the
 			// startup warning.
-			Retry: RetryConfig{Enabled: true, NonIdempotent: true},
+			Retry:                RetryConfig{Enabled: true, NonIdempotent: true},
+			ReasoningTranslation: true,
 			StickySessions: StickySessionConfig{
 				Enabled:         false,
 				IdleTTLSeconds:  600,
@@ -209,6 +210,11 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateQueue(); err != nil {
 		return err
+	}
+	for _, ep := range c.Discovery.Static.Endpoints {
+		if ep.ReasoningDialect != "" && !constants.IsValidReasoningDialect(ep.ReasoningDialect) {
+			return fmt.Errorf("endpoint %q reasoning_dialect %q is not one of openrouter, llamacpp, vllm, sglang, ollama, lmstudio, openai, passthrough", ep.Name, ep.ReasoningDialect)
+		}
 	}
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port must be between 1 and 65535, got %d", c.Server.Port)
@@ -470,6 +476,11 @@ func applyEnvOverrides(config *Config) {
 	if val := os.Getenv("OLLA_PROXY_RETRY_NON_IDEMPOTENT"); val != "" {
 		if allowed, err := strconv.ParseBool(val); err == nil {
 			config.Proxy.Retry.NonIdempotent = allowed
+		}
+	}
+	if val := os.Getenv("OLLA_PROXY_REASONING_TRANSLATION"); val != "" {
+		if enabled, err := strconv.ParseBool(val); err == nil {
+			config.Proxy.ReasoningTranslation = enabled
 		}
 	}
 	if val := os.Getenv("OLLA_LOGGING_LEVEL"); val != "" {

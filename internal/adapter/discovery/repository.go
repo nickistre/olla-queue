@@ -8,8 +8,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thushan/olla/internal/adapter/reasoning"
 	"github.com/thushan/olla/internal/adapter/registry/profile"
 	"github.com/thushan/olla/internal/config"
+	"github.com/thushan/olla/internal/core/constants"
 	"github.com/thushan/olla/internal/core/domain"
 	"github.com/thushan/olla/internal/util"
 	"github.com/thushan/olla/pkg/envresolver"
@@ -30,6 +32,18 @@ type StaticEndpointRepository struct {
 	endpoints      map[string]*domain.Endpoint
 	profileFactory *profile.Factory
 	mu             sync.RWMutex
+	// reasoningOff resolves every endpoint to the passthrough dialect, which
+	// is how proxy.reasoning_translation: false reaches the engines without
+	// them needing the proxy config.
+	reasoningOff bool
+}
+
+// SetReasoningTranslation turns reasoning dialect resolution on or off for
+// endpoints loaded after the call. It must run before LoadFromConfig.
+func (r *StaticEndpointRepository) SetReasoningTranslation(enabled bool) {
+	r.mu.Lock()
+	r.reasoningOff = !enabled
+	r.mu.Unlock()
 }
 
 func NewStaticEndpointRepository() *StaticEndpointRepository {
@@ -208,6 +222,7 @@ func (r *StaticEndpointRepository) LoadFromConfig(ctx context.Context, configs [
 			NoSlotDiscovery:       cfg.DiscoverSlots != nil && !*cfg.DiscoverSlots,
 			NoSticky:              cfg.StickySessions != nil && !*cfg.StickySessions,
 			SlotGroups:            slotGroups(cfg.SlotGroups),
+			ReasoningDialect:      r.resolveReasoningDialect(cfg, endpointURL),
 		}
 
 		if cfg.Auth != nil {
@@ -215,13 +230,9 @@ func (r *StaticEndpointRepository) LoadFromConfig(ctx context.Context, configs [
 		}
 
 		if len(cfg.Headers) > 0 {
-			resolvedHeaders := make(map[string]string, len(cfg.Headers))
-			for k, v := range cfg.Headers {
-				expanded, herr := envresolver.ExpandStrict(v)
-				if herr != nil {
-					return fmt.Errorf("endpoint %q: header %q: %w", cfg.Name, k, herr)
-				}
-				resolvedHeaders[k] = expanded
+			resolvedHeaders, herr := expandHeaders(cfg.Name, cfg.Headers)
+			if herr != nil {
+				return herr
 			}
 			newEndpoint.Headers = resolvedHeaders
 		}
@@ -234,6 +245,41 @@ func (r *StaticEndpointRepository) LoadFromConfig(ctx context.Context, configs [
 	r.mu.Unlock()
 
 	return nil
+}
+
+// expandHeaders resolves ${VAR} references in an endpoint's custom headers.
+func expandHeaders(endpointName string, headers map[string]string) (map[string]string, error) {
+	resolved := make(map[string]string, len(headers))
+	for k, v := range headers {
+		expanded, err := envresolver.ExpandStrict(v)
+		if err != nil {
+			return nil, fmt.Errorf("endpoint %q: header %q: %w", endpointName, k, err)
+		}
+		resolved[k] = expanded
+	}
+	return resolved, nil
+}
+
+// resolveReasoningDialect picks the endpoint's reasoning dialect from its
+// override, URL and profile. The "auto" type has no profile until detection,
+// so it stays passthrough unless overridden.
+func (r *StaticEndpointRepository) resolveReasoningDialect(cfg config.EndpointConfig, endpointURL *url.URL) string {
+	r.mu.RLock()
+	off := r.reasoningOff
+	r.mu.RUnlock()
+	if off {
+		return constants.ReasoningDialectPassthrough
+	}
+
+	var profileDefault string
+	if cfg.Type != "" && cfg.Type != domain.ProfileAuto && r.profileFactory != nil {
+		if p, err := r.profileFactory.GetProfile(cfg.Type); err == nil {
+			if pc := p.GetConfig(); pc != nil {
+				profileDefault = pc.Request.ReasoningDialect
+			}
+		}
+	}
+	return reasoning.ResolveDialect(cfg.ReasoningDialect, cfg.Type, endpointURL, profileDefault)
 }
 
 // resolveURLDefaults determines health check and model paths using fallback hierarchy:

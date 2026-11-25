@@ -65,6 +65,13 @@ func (t *Translator) TransformRequest(ctx context.Context, r *http.Request) (*tr
 		openaiReq["stop"] = anthropicReq.StopSequences
 	}
 
+	// Thinking and effort become the OpenAI-side reasoning object, the
+	// highest-precedence input form, so the proxy renders it into whatever
+	// dialect the chosen backend reads.
+	if reasoning := convertReasoning(anthropicReq.Thinking, anthropicReq.OutputConfig); reasoning != nil {
+		openaiReq["reasoning"] = reasoning
+	}
+
 	// Convert messages (includes system prompt injection)
 	openaiMessages, err := t.convertMessages(anthropicReq.Messages, anthropicReq.System)
 	if err != nil {
@@ -329,4 +336,41 @@ func (t *Translator) convertSystemPrompt(systemPrompt interface{}) interface{} {
 
 	// join text blocks directly without separator
 	return strings.Join(textParts, "")
+}
+
+// convertReasoning maps Anthropic's thinking config and output_config.effort
+// onto an OpenRouter-style reasoning object: enabled with budget_tokens sets
+// the budget, adaptive means on, disabled means off. An effort beside a
+// disabled config is dropped, since off already settles it and keeping it
+// would surface a conflict the client never wrote. Returns nil when neither
+// is set.
+func convertReasoning(thinking, outputConfig interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, 3)
+
+	disabled := false
+	if t, ok := thinking.(map[string]interface{}); ok {
+		switch typ, _ := t["type"].(string); typ {
+		case "enabled":
+			out["enabled"] = true
+			if budget, ok := t["budget_tokens"].(float64); ok && budget > 0 {
+				out["max_tokens"] = int(budget)
+			}
+		case "adaptive":
+			out["enabled"] = true
+		case "disabled":
+			out["enabled"] = false
+			disabled = true
+		}
+	}
+
+	if oc, ok := outputConfig.(map[string]interface{}); ok && !disabled {
+		if effort, ok := oc["effort"].(string); ok && effort != "" {
+			out["effort"] = effort
+		}
+	}
+
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

@@ -1270,6 +1270,7 @@ func (a *Application) copyOllaHeaders(from headerGetter, to http.ResponseWriter)
 		constants.HeaderXOllaRoutingDecision,
 		constants.HeaderXOllaRoutingReason,
 		constants.HeaderXOllaQueueWaitMs,
+		constants.HeaderXOllaReasoningConflict,
 		"Retry-After",
 	}
 

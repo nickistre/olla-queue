@@ -22,7 +22,11 @@ type ProfileConfig struct {
 	Request struct {
 		ModelFieldPaths []string `yaml:"model_field_paths"`
 		ResponseFormat  string   `yaml:"response_format"`
-		ParsingRules    struct {
+		// ReasoningDialect is the default request shape for reasoning controls
+		// on this backend type (see constants.ReasoningDialect*). Empty means
+		// passthrough. An endpoint's reasoning_dialect overrides it.
+		ReasoningDialect string `yaml:"reasoning_dialect,omitempty"`
+		ParsingRules     struct {
 			ChatCompletionsPath string `yaml:"chat_completions_path"`
 			CompletionsPath     string `yaml:"completions_path"`
 			GeneratePath        string `yaml:"generate_path"`

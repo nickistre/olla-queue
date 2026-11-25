@@ -5,6 +5,9 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -1784,4 +1787,27 @@ func TestLoadConfig_QueueEnvOverrides(t *testing.T) {
 	if !cfg.Proxy.Queue.Enabled || cfg.Proxy.Queue.MaxSize != 7 || cfg.Proxy.Queue.Timeout != 5*time.Second {
 		t.Fatalf("queue env overrides not applied: %+v", cfg.Proxy.Queue)
 	}
+}
+
+func TestValidate_ReasoningDialect(t *testing.T) {
+	t.Parallel()
+
+	ep := func(dialect string) EndpointConfig {
+		return EndpointConfig{Name: "ep", URL: "http://localhost:8080", Type: "llamacpp", ReasoningDialect: dialect}
+	}
+
+	cfg := DefaultConfig()
+	assert.True(t, cfg.Proxy.ReasoningTranslation, "reasoning translation defaults on")
+
+	for _, d := range []string{"", "openrouter", "llamacpp", "vllm", "sglang", "ollama", "lmstudio", "openai", "passthrough"} {
+		cfg := DefaultConfig()
+		cfg.Discovery.Static.Endpoints = []EndpointConfig{ep(d)}
+		assert.NoError(t, cfg.Validate(), d)
+	}
+
+	cfg = DefaultConfig()
+	cfg.Discovery.Static.Endpoints = []EndpointConfig{ep("llama.cpp")}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reasoning_dialect")
 }

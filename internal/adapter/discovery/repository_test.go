@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/thushan/olla/internal/adapter/registry/profile"
 	"github.com/thushan/olla/internal/config"
 )
 
@@ -935,3 +936,55 @@ func TestUpdateEndpoint_PersistsRateLimitedUntil(t *testing.T) {
 // Userinfo rejection and its redacted-error coverage live in
 // repository_userinfo_test.go (TestEndpointConfigValidation_RejectsUserinfo,
 // TestEndpointConfigValidation_AcceptsPlainURL).
+
+// The reasoning dialect is resolved once at load: an explicit override wins,
+// then an OpenRouter host on a generic OpenAI type, then the profile default.
+// With translation off every endpoint is passthrough.
+func TestLoadFromConfig_ReasoningDialect(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name, typ, url, override, want string
+		translationOff                 bool
+	}{
+		{name: "llamacpp profile default", typ: "llamacpp", url: "http://localhost:8080", want: "llamacpp"},
+		{name: "vllm-mlx profile default", typ: "vllm-mlx", url: "http://localhost:8000", want: "vllm"},
+		{name: "ollama profile default", typ: "ollama", url: "http://localhost:11434", want: "ollama"},
+		{name: "openrouter host", typ: "openai-compatible", url: "https://openrouter.ai/api", want: "openrouter"},
+		{name: "openai-compatible elsewhere", typ: "openai-compatible", url: "http://localhost:9000", want: "openai"},
+		{name: "override for llama-swap", typ: "openai-compatible", url: "http://localhost:9292", override: "llamacpp", want: "llamacpp"},
+		{name: "tei is passthrough", typ: "text-embeddings-inference", url: "http://localhost:8081", want: "passthrough"},
+		{name: "translation off", typ: "llamacpp", url: "http://localhost:8080", override: "llamacpp", translationOff: true, want: "passthrough"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// The shipped profiles, so every backend type is known.
+			factory, ferr := profile.NewFactory("../../../config/profiles")
+			if ferr != nil {
+				t.Fatalf("profile factory: %v", ferr)
+			}
+			repo := NewStaticEndpointRepositoryWithFactory(factory)
+			repo.SetReasoningTranslation(!tc.translationOff)
+			cfg := config.EndpointConfig{
+				Name:             "ep",
+				URL:              tc.url,
+				Type:             tc.typ,
+				Priority:         ptrInt(100),
+				CheckInterval:    5 * time.Second,
+				CheckTimeout:     2 * time.Second,
+				ReasoningDialect: tc.override,
+			}
+			if err := repo.LoadFromConfig(context.Background(), []config.EndpointConfig{cfg}); err != nil {
+				t.Fatalf("LoadFromConfig failed: %v", err)
+			}
+			endpoints, err := repo.GetAll(context.Background())
+			if err != nil || len(endpoints) != 1 {
+				t.Fatalf("GetAll: %v, %d endpoints", err, len(endpoints))
+			}
+			if got := endpoints[0].ReasoningDialect; got != tc.want {
+				t.Errorf("ReasoningDialect = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
