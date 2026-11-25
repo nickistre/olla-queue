@@ -26,7 +26,7 @@ import (
 // Conflicting inputs are resolved by precedence, never rejected: the losing
 // fields go in X-Olla-Reasoning-Conflict, which must be set here because the
 // response headers are committed once the backend answers.
-func RewriteReasoningForEndpoint(r *http.Request, w http.ResponseWriter, endpoint *domain.Endpoint, path, requestID string, log logger.StyledLogger) {
+func RewriteReasoningForEndpoint(r *http.Request, w http.ResponseWriter, endpoint *domain.Endpoint, path string, log logger.StyledLogger) {
 	// A previous attempt may have set the header for a dialect this one
 	// doesn't use. Its value also tells a retry it has already warned.
 	var warned string
@@ -61,7 +61,7 @@ func RewriteReasoningForEndpoint(r *http.Request, w http.ResponseWriter, endpoin
 	rendered, err := reasoning.Render(body, intent, dialect, path)
 	if err != nil {
 		if log != nil {
-			log.Debug("Reasoning translation skipped", "request_id", requestID, "endpoint", endpoint.Name, "error", err)
+			log.Debug("Reasoning translation skipped", "endpoint", endpoint.Name, "error", err)
 		}
 		return
 	}
@@ -72,7 +72,6 @@ func RewriteReasoningForEndpoint(r *http.Request, w http.ResponseWriter, endpoin
 		if log != nil && fields != warned {
 			for _, c := range conflicts {
 				log.Warn("Conflicting reasoning fields, lower-precedence value ignored",
-					"request_id", requestID,
 					"setting", c.Setting,
 					"ignored", c.Field,
 					"used", c.Winner)
@@ -83,14 +82,13 @@ func RewriteReasoningForEndpoint(r *http.Request, w http.ResponseWriter, endpoin
 	if log != nil {
 		if intent.Exclude != nil && *intent.Exclude && !reasoning.HonoursExclude(dialect) {
 			log.Debug("Reasoning exclude has no equivalent on this backend, reasoning text will be returned",
-				"request_id", requestID, "endpoint", endpoint.Name, "dialect", dialect)
+				"endpoint", endpoint.Name, "dialect", dialect)
 		}
 		// Only a real change is worth an info line; a client already speaking
 		// the backend's dialect renders back to the same bytes.
 		if !bytes.Equal(rendered, body) {
 			out, _, _ := reasoning.Parse(rendered)
 			log.Info("Reasoning parameters translated",
-				"request_id", requestID,
 				"endpoint", endpoint.Name,
 				"from", strings.Join(intent.Formats(), ","),
 				"to", dialect,

@@ -106,7 +106,7 @@ func (s *Service) proxyToSingleEndpoint(ctx context.Context, w http.ResponseWrit
 	core.RewriteModelForAlias(ctx, r, endpoint)
 	// Reasoning controls follow the endpoint too, so an overflow onto a
 	// different backend type still gets them in a shape it reads.
-	core.RewriteReasoningForEndpoint(r, w, endpoint, targetURL.Path, stats.RequestID, rlog)
+	core.RewriteReasoningForEndpoint(r, w, endpoint, targetURL.Path, rlog)
 
 	// log at DEBUG when a model alias rewrite occurred so operators can correlate
 	// the alias name the client sent with the actual model dispatched to the backend

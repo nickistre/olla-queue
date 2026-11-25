@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,7 +32,7 @@ func TestRewriteReasoningForEndpoint_RewritesAndSetsLength(t *testing.T) {
 	w := httptest.NewRecorder()
 	ep := &domain.Endpoint{Name: "local", ReasoningDialect: constants.ReasoningDialectLlamaCpp}
 
-	RewriteReasoningForEndpoint(r, w, ep, "/v1/chat/completions", "req-1", nil)
+	RewriteReasoningForEndpoint(r, w, ep, "/v1/chat/completions", nil)
 
 	got, err := io.ReadAll(r.Body)
 	require.NoError(t, err)
@@ -53,7 +54,7 @@ func TestRewriteReasoningForEndpoint_ConflictHeader(t *testing.T) {
 	w := httptest.NewRecorder()
 	ep := &domain.Endpoint{Name: "or", ReasoningDialect: constants.ReasoningDialectOpenRouter}
 
-	RewriteReasoningForEndpoint(r, w, ep, "/api/v1/chat/completions", "req-2", nil)
+	RewriteReasoningForEndpoint(r, w, ep, "/api/v1/chat/completions", nil)
 
 	assert.Equal(t, "reasoning_effort,chat_template_kwargs.reasoning_effort",
 		w.Header().Get(constants.HeaderXOllaReasoningConflict))
@@ -85,7 +86,7 @@ func TestRewriteReasoningForEndpoint_LeavesBodyAlone(t *testing.T) {
 			w := httptest.NewRecorder()
 			ep := &domain.Endpoint{Name: "e", ReasoningDialect: tt.dialect}
 
-			RewriteReasoningForEndpoint(r, w, ep, tt.path, "req", nil)
+			RewriteReasoningForEndpoint(r, w, ep, tt.path, nil)
 
 			got, err := io.ReadAll(r.Body)
 			require.NoError(t, err)
@@ -104,7 +105,7 @@ func TestRewriteReasoningForEndpoint_ClearsStaleHeader(t *testing.T) {
 	w.Header().Set(constants.HeaderXOllaReasoningConflict, "reasoning_effort")
 	r := newReasoningRequest(`{"reasoning":{"effort":"low"},"reasoning_effort":"high"}`)
 
-	RewriteReasoningForEndpoint(r, w, &domain.Endpoint{ReasoningDialect: constants.ReasoningDialectPassthrough}, "/v1/chat/completions", "req", nil)
+	RewriteReasoningForEndpoint(r, w, &domain.Endpoint{ReasoningDialect: constants.ReasoningDialectPassthrough}, "/v1/chat/completions", nil)
 
 	assert.Empty(t, w.Header().Get(constants.HeaderXOllaReasoningConflict))
 }
@@ -113,11 +114,14 @@ func TestRewriteReasoningForEndpoint_LogsTranslation(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	log := logger.NewPlainStyledLogger(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	// The proxy passes a request-scoped logger, so request_id comes from it.
+	log := logger.NewPlainStyledLogger(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))).WithRequestID("req-log")
 	ep := &domain.Endpoint{Name: "local", ReasoningDialect: constants.ReasoningDialectLlamaCpp}
 
 	r := newReasoningRequest(`{"model":"m","reasoning":{"enabled":false,"effort":"none"}}`)
-	RewriteReasoningForEndpoint(r, httptest.NewRecorder(), ep, "/v1/chat/completions", "req-log", log)
+	RewriteReasoningForEndpoint(r, httptest.NewRecorder(), ep, "/v1/chat/completions", log)
+
+	assert.Equal(t, 1, strings.Count(buf.String(), `"request_id"`), "request_id must not be repeated")
 
 	var entry map[string]any
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &entry))
@@ -138,7 +142,7 @@ func TestRewriteReasoningForEndpoint_NoInfoLogWhenUnchanged(t *testing.T) {
 	ep := &domain.Endpoint{Name: "local", ReasoningDialect: constants.ReasoningDialectOpenAI}
 
 	r := newReasoningRequest(`{"model":"m","reasoning_effort":"low"}`)
-	RewriteReasoningForEndpoint(r, httptest.NewRecorder(), ep, "/v1/chat/completions", "req-same", log)
+	RewriteReasoningForEndpoint(r, httptest.NewRecorder(), ep, "/v1/chat/completions", log)
 
 	assert.Empty(t, buf.String(), "a body already in the backend's dialect is not a translation")
 }
